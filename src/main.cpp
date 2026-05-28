@@ -1,6 +1,7 @@
 #include <arpa/inet.h>
 #include <cstring>
 #include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -9,13 +10,21 @@
 //#include <openssl/ssl.h>
 //#include <openssl/err.h>
 #include <slim/common/network/client/tcp.h>
-slim::common::network::client::tcp::Connection::Connection(std::string_view _host, const int _port, const bool _is_tls = false) {
-
+slim::common::network::client::tcp::Connection::Connection(std::string_view _host, const int _port, const bool _is_tls) : __is_tls(_is_tls) {
+	__socket_handle = socket(AF_INET, SOCK_STREAM, 0);
+	if(__socket_handle < 0) {
+		__error_info = slim::ErrorInfo(errno, strerror(errno));
+	}
+	else {
+		memset(&__hints, 0, sizeof(__hints));
+		__hints.ai_family = AF_INET;
+    	__hints.ai_socktype = SOCK_STREAM;
+	}
 }
 
 slim::common::network::client::tcp::Connection::~Connection() {
 	close(__socket_handle);
-	freeaddrinfo(__addrinfo_pointer);
+	freeaddrinfo(__addrinfo);
 }
 
 slim::SlimValue slim::common::network::client::tcp::Connection::read() {
