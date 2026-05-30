@@ -6,25 +6,81 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <memory>
+#include <format>
+//#include <memory>
 //#include <openssl/ssl.h>
 //#include <openssl/err.h>
 #include <slim/common/network/client/tcp.h>
-slim::common::network::client::tcp::Connection::Connection(std::string_view _host, const int _port, const bool _is_tls) : __is_tls(_is_tls) {
-	__socket_handle = socket(AF_INET, SOCK_STREAM, 0);
-	if(__socket_handle < 0) {
-		__error_info = slim::ErrorInfo(errno, strerror(errno));
+
+#include <slim/common/log.h>
+
+slim::common::network::client::tcp::Connection::Connection(std::string_view _host, const uint16_t _port, const bool _is_tls) {
+	__is_tls = _is_tls;
+	bool valid_host = false;
+	auto ip_info_errno = inet_pton(AF_INET, _host.data(), &__addrinfo);
+	switch(ip_info_errno) {
+		case 0: {
+				memset(&__hints, 0, sizeof(__hints));
+				__hints.ai_family = AF_INET;
+				__hints.ai_socktype = SOCK_STREAM;
+				auto address_info_errno = getaddrinfo(_host.data(), NULL, &__hints, &__addrinfo);
+				if(address_info_errno == 0) {
+					valid_host = true;
+					slim::common::log::debug(slim::common::log::Message(__func__, "is valid host", __FILE__, __LINE__));
+				}
+				else {
+					__error_info = slim::ErrorInfo(address_info_errno, std::format("unable to secure socket => {}", gai_strerror(address_info_errno)));
+				}
+			}
+			break;
+		case 1:
+			valid_host = true;
+			slim::common::log::debug(slim::common::log::Message(__func__, "is ip address", __FILE__, __LINE__));
+			break;
+		default:
+			__error_info = slim::ErrorInfo(errno, std::format("unable to convert IP address => {} => {}", _host, strerror(errno)));
+			break;
 	}
-	else {
-		memset(&__hints, 0, sizeof(__hints));
-		__hints.ai_family = AF_INET;
-    	__hints.ai_socktype = SOCK_STREAM;
+
+	if(valid_host) {
+		__socket_handle = socket(AF_INET, SOCK_STREAM, 0);
+		if(__socket_handle < 0) {
+			__error_info = slim::ErrorInfo(errno, std::format("unable to secure socket => {}", strerror(errno)));
+		}
+		else {
+			auto flags = fcntl(__socket_handle, F_GETFL, 0);
+			if(flags == -1) {
+				__error_info = slim::ErrorInfo(errno, std::format("unable to secure socket flags => {}", strerror(errno)));
+			}
+			else {
+				if(fcntl(__socket_handle, F_SETFL, flags | O_NONBLOCK) == -1) {
+					__error_info = slim::ErrorInfo(errno, std::format("unable to set socket flags => {}", strerror(errno)));
+    			}
+				else {
+					memcpy(&__server_address, __addrinfo->ai_addr, sizeof(struct sockaddr_in));
+					memset(__server_address.sin_zero, 0, sizeof(__server_address.sin_zero));
+					__server_address.sin_port = htons(_port);
+					auto connection_info = connect(__socket_handle, (struct sockaddr*)&__server_address, sizeof(__server_address));
+					if(errno != EINPROGRESS) {
+						__error_info = slim::ErrorInfo(errno, std::format("connection to server failed for => {}:{} => {}", _host, _port, strerror(errno)));
+					}
+				}
+			}
+		}
 	}
 }
 
 slim::common::network::client::tcp::Connection::~Connection() {
 	close(__socket_handle);
 	freeaddrinfo(__addrinfo);
+}
+
+slim::ErrorInfo slim::common::network::client::tcp::Connection::get_error() const {
+	return __error_info;
+}
+
+bool slim::common::network::client::tcp::Connection::has_error() const {
+	return __error_info.has_error();
 }
 
 slim::SlimValue slim::common::network::client::tcp::Connection::read() {
