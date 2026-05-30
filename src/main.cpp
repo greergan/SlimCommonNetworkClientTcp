@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -12,57 +13,73 @@
 //#include <openssl/err.h>
 #include <slim/common/network/client/tcp.h>
 
-#include <slim/common/log.h>
-
-slim::common::network::client::tcp::Connection::Connection(std::string_view _host, const uint16_t _port, const bool _is_tls) {
+slim::common::network::client::tcp::Connection::Connection(std::string_view _host, const uint16_t _port, const bool _is_tls, const int _timeout_ms) {
 	__is_tls = _is_tls;
 	bool valid_host = false;
-	auto ip_info_errno = inet_pton(AF_INET, _host.data(), &__addrinfo);
+
+	memset(&__server_address, 0, sizeof(__server_address));
+	__server_address.sin_family = AF_INET;
+	__server_address.sin_port = htons(_port);
+
+	struct in_addr ip_addr;
+	auto ip_info_errno = inet_pton(AF_INET, _host.data(), &ip_addr);
 	switch(ip_info_errno) {
 		case 0: {
-				memset(&__hints, 0, sizeof(__hints));
-				__hints.ai_family = AF_INET;
-				__hints.ai_socktype = SOCK_STREAM;
-				auto address_info_errno = getaddrinfo(_host.data(), NULL, &__hints, &__addrinfo);
-				if(address_info_errno == 0) {
-					valid_host = true;
-					slim::common::log::debug(slim::common::log::Message(__func__, "is valid host", __FILE__, __LINE__));
-				}
-				else {
-					__error_info = slim::ErrorInfo(address_info_errno, std::format("unable to secure socket => {}", gai_strerror(address_info_errno)));
-				}
+			struct addrinfo hints;
+			memset(&hints, 0, sizeof(hints));
+			hints.ai_family = AF_INET;
+			hints.ai_socktype = SOCK_STREAM;
+			auto address_info_errno = getaddrinfo(_host.data(), NULL, &hints, &__addrinfo);
+			if(address_info_errno == 0) {
+				valid_host = true;
+				memcpy(&__server_address, __addrinfo->ai_addr, sizeof(struct sockaddr_in));
+				__server_address.sin_port = htons(_port);
 			}
-			break;
+			else {
+				__error_info = slim::ErrorInfo(address_info_errno, std::format("{} => unable to resolve host => {}", __func__, gai_strerror(address_info_errno)));
+			}
+		}
+		break;
 		case 1:
 			valid_host = true;
-			slim::common::log::debug(slim::common::log::Message(__func__, "is ip address", __FILE__, __LINE__));
+			__server_address.sin_addr = ip_addr;
 			break;
 		default:
-			__error_info = slim::ErrorInfo(errno, std::format("unable to convert IP address => {} => {}", _host, strerror(errno)));
+			__error_info = slim::ErrorInfo(errno, std::format("{} => unable to convert IP address => {} => {}", __func__, _host, strerror(errno)));
 			break;
 	}
 
 	if(valid_host) {
 		__socket_handle = socket(AF_INET, SOCK_STREAM, 0);
 		if(__socket_handle < 0) {
-			__error_info = slim::ErrorInfo(errno, std::format("unable to secure socket => {}", strerror(errno)));
+			__error_info = slim::ErrorInfo(errno, std::format("{} => unable to secure socket => {}", __func__, strerror(errno)));
 		}
 		else {
 			auto flags = fcntl(__socket_handle, F_GETFL, 0);
 			if(flags == -1) {
-				__error_info = slim::ErrorInfo(errno, std::format("unable to secure socket flags => {}", strerror(errno)));
+				__error_info = slim::ErrorInfo(errno, std::format("{} => unable to secure socket flags => {}", __func__, strerror(errno)));
 			}
 			else {
 				if(fcntl(__socket_handle, F_SETFL, flags | O_NONBLOCK) == -1) {
-					__error_info = slim::ErrorInfo(errno, std::format("unable to set socket flags => {}", strerror(errno)));
-    			}
+					__error_info = slim::ErrorInfo(errno, std::format("{} => unable to set socket flags => {}", __func__, strerror(errno)));
+				}
 				else {
-					memcpy(&__server_address, __addrinfo->ai_addr, sizeof(struct sockaddr_in));
-					memset(__server_address.sin_zero, 0, sizeof(__server_address.sin_zero));
-					__server_address.sin_port = htons(_port);
-					auto connection_info = connect(__socket_handle, (struct sockaddr*)&__server_address, sizeof(__server_address));
-					if(errno != EINPROGRESS) {
-						__error_info = slim::ErrorInfo(errno, std::format("connection to server failed for => {}:{} => {}", _host, _port, strerror(errno)));
+					connect(__socket_handle, (struct sockaddr*)&__server_address, sizeof(__server_address));
+					struct pollfd pfd = { __socket_handle, POLLOUT, 0 };
+					auto poll_result = poll(&pfd, 1, _timeout_ms);
+					if(poll_result == 0) {
+						__error_info = slim::ErrorInfo(ETIMEDOUT, std::format("{} => connection timed out => {}:{}", __func__, _host, _port));
+					}
+					else if(poll_result < 0) {
+						__error_info = slim::ErrorInfo(errno, std::format("{} => poll failed => {}", __func__, strerror(errno)));
+					}
+					else {
+						int so_error = 0;
+						socklen_t len = sizeof(so_error);
+						getsockopt(__socket_handle, SOL_SOCKET, SO_ERROR, &so_error, &len);
+						if(so_error != 0) {
+							__error_info = slim::ErrorInfo(so_error, std::format("{} => connection to server failed for => {}:{} => {}", __func__, _host, _port, strerror(so_error)));
+						}
 					}
 				}
 			}
@@ -72,7 +89,9 @@ slim::common::network::client::tcp::Connection::Connection(std::string_view _hos
 
 slim::common::network::client::tcp::Connection::~Connection() {
 	close(__socket_handle);
-	freeaddrinfo(__addrinfo);
+	if(__addrinfo != nullptr) {
+		freeaddrinfo(__addrinfo);
+	}
 }
 
 slim::ErrorInfo slim::common::network::client::tcp::Connection::get_error() const {
@@ -83,204 +102,67 @@ bool slim::common::network::client::tcp::Connection::has_error() const {
 	return __error_info.has_error();
 }
 
-slim::SlimValue slim::common::network::client::tcp::Connection::read() {
-	slim::SlimValue results;
-	return results;
-}
-
-slim::SlimValue slim::common::network::client::tcp::Connection::write(std::string_view _payload) {
-	slim::SlimValue results;
-	return results;
-}
-
-/* slim::common::network::client::tcp::Connection::Connection(slim::common::WebFile* _web_file_ptr) {
-	log::trace(log::Message(__func__,"begins",__FILE__, __LINE__));
-	auto socket_handle = socket(AF_INET, SOCK_STREAM, 0);
-	if(socket_handle < 0) {
-		log::error(log::Message(__func__,"invalid socket handle received",__FILE__, __LINE__));
-    }
-	else {
-		struct addrinfo hints;
-		memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-		auto gai_rc = getaddrinfo(_web_file_ptr->request().url().hostname().value().c_str(), NULL, &hints, &addrinfo_pointer);
-		if(gai_rc != 0) {
-			std::string error_string = gai_strerror(gai_rc);
-			log::error(log::Message(__func__,error_string,__FILE__, __LINE__));
+slim::SlimValue slim::common::network::client::tcp::Connection::read(const int _timeout_ms) {
+	slim::SlimValue result = slim_storage_container{};
+	auto& container = result.get<slim_storage_container>();
+	while(true) {
+		struct pollfd pfd = { __socket_handle, POLLIN, 0 };
+		auto poll_result = poll(&pfd, 1, _timeout_ms);
+		if(poll_result == 0) {
+			break;
+		}
+		else if(poll_result < 0) {
+			result.set_error(slim::ErrorInfo(errno, std::format("{} => poll failed => {}", __func__, strerror(errno))));
+			break;
+		}
+		auto offset = container.size();
+		container.resize(offset + BUFFER_SIZE);
+		auto bytes_read = ::read(__socket_handle, container.data() + offset, BUFFER_SIZE);
+		if(bytes_read > 0) {
+			container.resize(offset + static_cast<size_t>(bytes_read));
+		}
+		else if(bytes_read == 0) {
+			container.resize(offset);
+			break;
 		}
 		else {
-            memcpy(&server_address, addrinfo_pointer->ai_addr, sizeof(struct sockaddr_in));
-    		memset(server_address.sin_zero, 0, sizeof(server_address.sin_zero));
-			if(connect(socket_handle, (struct sockaddr*)&server_address, sizeof(server_address)) < 0) {
-				std::string error_string = "connection to server failed";
-				log::error(log::Message(__func__,error_string,__FILE__, __LINE__));
+			container.resize(offset);
+			if(errno == EAGAIN || errno == EWOULDBLOCK) {
+				break;
 			}
-			else {
-				int flags = fcntl(socket_handle, F_GETFL, 0);
-				if(flags == -1) {
-					std::string error_string = "error getting socket flags";
-					log::error(log::Message(__func__,error_string,__FILE__, __LINE__));
-				}
-				else {
-					bool is_tls = _web_file_ptr->request().url().protocol() == "https" ? true : false;
-					//flags = flags | O_NONBLOCK;
-					if(fcntl(socket_handle, F_SETFL, flags) == -1) {
-						std::string error_string = "error setting socket flags";
-						log::error(log::Message(__func__,error_string,__FILE__, __LINE__));
-					}
-					else {
-						log::debug(log::Message(__func__,"connected to => " + _web_file_ptr->request().url().hostname().value(),__FILE__, __LINE__));
-						auto request_string = _web_file_ptr->request().to_string();
-
-						int bytes_read = 0;
-						long total_bytes_read = 0;
-						int index = 0;
-						SSL* ssl_socket_handle = nullptr;
-						if(is_tls) {
-							const SSL_METHOD* method =SSLv23_client_method();
-							SSL_CTX* ctx = SSL_CTX_new(method);
-							if(ctx == nullptr) {
-								log::error(log::Message(__func__,"unable to create SSL context",__FILE__, __LINE__));
-								return;
-							}
-							ssl_socket_handle = SSL_new(ctx);
-							SSL_set_fd(ssl_socket_handle, socket_handle);
-							SSL_set_connect_state(ssl_socket_handle);
-							if(SSL_connect(ssl_socket_handle) <= 0) {
-								int ssl_error_number = SSL_get_error(ssl_socket_handle, -1);
-        						SSL_free(ssl_socket_handle);
-        						SSL_CTX_free(ctx);
-								close(socket_handle);
-								log::error(log::Message(__func__,"unable to establish SSL connection",__FILE__, __LINE__));
-								return;
-							}
-							else {
-								log::debug(log::Message(__func__,"SSL connection established to => " 
-									+ _web_file_ptr->request().url().host().value() + " using cipher => " + SSL_get_cipher(ssl_socket_handle),__FILE__, __LINE__));
-								int ret = SSL_write(ssl_socket_handle, request_string.c_str(), strlen(request_string.c_str()));
-							}
-						}
-						else {
-							log::debug(log::Message(__func__,"not using TLS for => " + _web_file_ptr->request().url().hostname().value(),__FILE__, __LINE__));
-							send(socket_handle, request_string.c_str(), request_string.size(), 0);
-						}
-						looper:
-						_web_file_ptr->data()->resize(total_bytes_read + BUFFER_SIZE);
-						memset(&(_web_file_ptr->data().get()->data())[total_bytes_read], 0, _web_file_ptr->data()->size() - total_bytes_read);
-						if(is_tls) {
-							bytes_read = SSL_read(ssl_socket_handle, &(_web_file_ptr->data().get()->data())[total_bytes_read], BUFFER_SIZE);
-						}
-						else {
-							bytes_read = read(socket_handle, &(_web_file_ptr->data().get()->data())[total_bytes_read], BUFFER_SIZE);
-						}
-						auto error_number = errno;
-						if(bytes_read > 0) {
-							log::debug(log::Message(__func__,"read bytes => " + std::to_string(bytes_read),__FILE__, __LINE__));
-							total_bytes_read += bytes_read;
-							goto looper;
-						}
-						else if(error_number == EAGAIN) {
-							log::debug(log::Message(__func__,"errno => EAGAIN",__FILE__, __LINE__));
-							goto looper;
-						}
-						else if(error_number == EWOULDBLOCK) {
-							log::debug(log::Message(__func__,"errno => EWOULDBLOCK",__FILE__, __LINE__));
-							goto looper;
-						}
-						else if(bytes_read == -1) {
-							log::error(log::Message(__func__,"error reading from => " 
-								+ _web_file_ptr->request().url().hostname().value() + " errno => " + std::to_string(errno),__FILE__, __LINE__));
-						}
-						log::debug(log::Message(__func__,"read from => " + _web_file_ptr->request().url().host().value(),__FILE__, __LINE__));
-						close(socket_handle);
-					}
-				}
-			}
+			result.set_error(slim::ErrorInfo(errno, std::format("{} => read failed => {}", __func__, strerror(errno))));
+			break;
 		}
 	}
-	log::trace(log::Message(__func__,"ends",__FILE__, __LINE__));
-} */
-
-/* switch (err) {
-        case SSL_ERROR_WANT_READ:
-        case SSL_ERROR_WANT_WRITE:
-            // Retry the operation later
-            break;
-        case SSL_ERROR_SSL:
-        case SSL_ERROR_SYSCALL: {
-            unsigned long sslerr;
-            while ((sslerr = ERR_get_error())) {
-                // Get the human-readable error string
-                const char *errmsg = ERR_error_string(sslerr, NULL);
-                // Process or log the error string
-                printf("SSL error: %s\n", errmsg);
-            }
-            break;
-        }
-        case SSL_ERROR_ZERO_RETURN:
-            // Connection closed cleanly
-            break;
-        default:
-            // Handle other errors
-            break;
-    }	
- */
-
-/* #include <stdio.h>
-#include <openssl/ssl.h>
-#include <openssl/err.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-
-SSL_CTX* InitCTX(void) {
-    SSL_METHOD *method;
-    SSL_CTX *ctx;
-
-    OpenSSL_add_all_algorithms();
-    SSL_load_error_strings();
-    // Use TLS_client_method for client connections
-    method = (SSL_METHOD *)TLS_client_method();
-    ctx = SSL_CTX_new(method);
-
-    if (ctx == NULL) {
-        ERR_print_errors_fp(stderr);
-        abort();
-    }
-    return ctx;
+	return result;
 }
 
-int main() {
-    SSL_CTX *ctx;
-    SSL *ssl;
-    int sock;
-    struct sockaddr_in server;
-
-    ctx = InitCTX();
-
-    // Create socket
-    sock = socket(AF_INET, SOCK_STREAM, 0);
-    server.sin_family = AF_INET;
-    server.sin_port = htons(443);
-    inet_pton(AF_INET, "127.0.0.1", &server.sin_addr);
-
-    // Connect to server
-    connect(sock, (struct sockaddr *)&server, sizeof(server));
-
-    // Create SSL object
-    ssl = SSL_new(ctx);
-    SSL_set_fd(ssl, sock);
-
-    // Perform handshake
-    if (SSL_connect(ssl) == 1) {
-        printf("Connected with %s encryption\n", SSL_get_cipher(ssl));
-    } else {
-        ERR_print_errors_fp(stderr);
-    }
-
-    SSL_shutdown(ssl);
-    SSL_free(ssl);
-    SSL_CTX_free(ctx);
-    close(sock);
-    return 0;
-}    */
+slim::SlimValue slim::common::network::client::tcp::Connection::write(std::string_view _payload, const int _timeout_ms) {
+	slim::SlimValue result = true;
+	size_t total_sent = 0;
+	while(total_sent < _payload.size()) {
+		struct pollfd pfd = { __socket_handle, POLLOUT, 0 };
+		auto poll_result = poll(&pfd, 1, _timeout_ms);
+		if(poll_result == 0) {
+			result = false;
+			result.set_error(slim::ErrorInfo(ETIMEDOUT, std::format("{} => write timed out", __func__)));
+			break;
+		}
+		else if(poll_result < 0) {
+			result = false;
+			result.set_error(slim::ErrorInfo(errno, std::format("{} => poll failed => {}", __func__, strerror(errno))));
+			break;
+		}
+		auto bytes_sent = send(__socket_handle, _payload.data() + total_sent, _payload.size() - total_sent, 0);
+		if(bytes_sent < 0) {
+			if(errno == EAGAIN || errno == EWOULDBLOCK) {
+				continue;
+			}
+			result = false;
+			result.set_error(slim::ErrorInfo(errno, std::format("{} => socket write failed => {}", __func__, strerror(errno))));
+			break;
+		}
+		total_sent += static_cast<size_t>(bytes_sent);
+	}
+	return result;
+}
