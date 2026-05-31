@@ -49,7 +49,7 @@ TEST_CASE("invalid host [tcp]") {
 }
 
 TEST_CASE("invalid port [tcp]") {
-	const int timeout_ms = 500;
+	const int timeout_ms = 750;
 	auto start = std::chrono::steady_clock::now();
 	auto connection = Connection("example.com", 1234, false, timeout_ms);
 	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
@@ -80,4 +80,37 @@ TEST_CASE("read without write [tcp]") {
 	auto response = connection.read();
 	REQUIRE_FALSE(response.has_error());
 	REQUIRE(response.get_storage_container().empty());
+}
+
+TEST_CASE("valid host write and read port 443 tls [tcp]") {
+#ifdef SLIM_TLS_ENABLED
+	auto connection = Connection("example.com", 443, true);
+	REQUIRE_FALSE(connection.has_error());
+	auto result = connection.write(request);
+	REQUIRE(result);
+	auto response = connection.read();
+	REQUIRE(response.to_string().starts_with("HTTP/1.1 200 OK"));
+#else
+	SKIP("SLIM_TLS_ENABLED not set");
+#endif
+}
+
+TEST_CASE("shared ssl context port 443 tls [tcp]") {
+#ifdef SLIM_TLS_ENABLED
+	SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+	REQUIRE(ctx != nullptr);
+	auto connection1 = Connection("example.com", 443, ctx);
+	REQUIRE_FALSE(connection1.has_error());
+	auto result1 = connection1.write(request);
+	REQUIRE(result1);
+	REQUIRE(connection1.read().to_string().starts_with("HTTP/1.1 200 OK"));
+	auto connection2 = Connection("example.com", 443, ctx);
+	REQUIRE_FALSE(connection2.has_error());
+	auto result2 = connection2.write(request);
+	REQUIRE(result2);
+	REQUIRE(connection2.read().to_string().starts_with("HTTP/1.1 200 OK"));
+	SSL_CTX_free(ctx);
+#else
+	SKIP("SLIM_TLS_ENABLED not set");
+#endif
 }

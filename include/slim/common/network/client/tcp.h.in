@@ -41,7 +41,7 @@ namespace slim::common::network::client::tcp {
 			SSL_CTX* __ssl_ctx      = nullptr;
 			SSL*     __ssl          = nullptr;
 			bool     __owns_ssl_ctx = false;
-			void __init_tls(std::string_view _host);
+			void __init_tls(std::string_view _host, const int _timeout_ms);
 			static std::once_flag __ssl_init_flag;
 #endif
 			void __init_socket(std::string_view _host, const uint16_t _port, const int _timeout_ms);
