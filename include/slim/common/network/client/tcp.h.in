@@ -5,6 +5,12 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
+#ifdef SLIM_TLS_ENABLED
+#include <mutex>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#endif
+
 #include <string_view>
 #include <slim/SlimValue.hpp>
 
@@ -16,6 +22,9 @@ namespace slim::common::network::client::tcp {
 	struct Connection {
 		Connection() = delete;
 		Connection(std::string_view _host, const uint16_t _port, const bool _is_tls = false, const int _timeout_ms = 5000);
+#ifdef SLIM_TLS_ENABLED
+		Connection(std::string_view _host, const uint16_t _port, SSL_CTX* _ssl_ctx, const int _timeout_ms = 5000);
+#endif
 		~Connection();
 		slim::ErrorInfo get_error() const;
 		bool has_error() const;
@@ -28,6 +37,14 @@ namespace slim::common::network::client::tcp {
 			struct addrinfo* __addrinfo = nullptr;
 			bool __is_tls = false;
 			slim::ErrorInfo __error_info;
+#ifdef SLIM_TLS_ENABLED
+			SSL_CTX* __ssl_ctx      = nullptr;
+			SSL*     __ssl          = nullptr;
+			bool     __owns_ssl_ctx = false;
+			void __init_tls(std::string_view _host);
+			static std::once_flag __ssl_init_flag;
+#endif
+			void __init_socket(std::string_view _host, const uint16_t _port, const int _timeout_ms);
 	};
 }
 

@@ -4,23 +4,21 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
-#include <sys/types.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <format>
-//#include <memory>
-//#include <openssl/ssl.h>
-//#include <openssl/err.h>
 #include <slim/common/network/client/tcp.h>
 
-slim::common::network::client::tcp::Connection::Connection(std::string_view _host, const uint16_t _port, const bool _is_tls, const int _timeout_ms) {
-	__is_tls = _is_tls;
-	bool valid_host = false;
+#ifdef SLIM_TLS_ENABLED
+std::once_flag slim::common::network::client::tcp::Connection::__ssl_init_flag;
+#endif
 
+void slim::common::network::client::tcp::Connection::__init_socket(std::string_view _host, const uint16_t _port, const int _timeout_ms) {
 	memset(&__server_address, 0, sizeof(__server_address));
 	__server_address.sin_family = AF_INET;
 	__server_address.sin_port = htons(_port);
 
+	bool valid_host = false;
 	struct in_addr ip_addr;
 	auto ip_info_errno = inet_pton(AF_INET, _host.data(), &ip_addr);
 	switch(ip_info_errno) {
@@ -87,7 +85,63 @@ slim::common::network::client::tcp::Connection::Connection(std::string_view _hos
 	}
 }
 
+slim::common::network::client::tcp::Connection::Connection(std::string_view _host, const uint16_t _port, const bool _is_tls, const int _timeout_ms) {
+	__is_tls = _is_tls;
+	__init_socket(_host, _port, _timeout_ms);
+#ifdef SLIM_TLS_ENABLED
+	if(!has_error() && __is_tls) {
+		__ssl_ctx = SSL_CTX_new(TLS_client_method());
+		__owns_ssl_ctx = true;
+		__init_tls(_host);
+	}
+#else
+	if(!has_error() && __is_tls) {
+		__error_info = slim::ErrorInfo(ENOTSUP, std::format("{} => TLS requested but SLIM_TLS_ENABLED not set at compile time", __func__));
+	}
+#endif
+}
+
+#ifdef SLIM_TLS_ENABLED
+slim::common::network::client::tcp::Connection::Connection(std::string_view _host, const uint16_t _port, SSL_CTX* _ssl_ctx, const int _timeout_ms) {
+	__is_tls = true;
+	__ssl_ctx = _ssl_ctx;
+	__owns_ssl_ctx = false;
+	__init_socket(_host, _port, _timeout_ms);
+	if(!has_error()) {
+		__init_tls(_host);
+	}
+}
+
+void slim::common::network::client::tcp::Connection::__init_tls(std::string_view _host) {
+	std::call_once(__ssl_init_flag, []{ OPENSSL_init_ssl(0, nullptr); });
+	__ssl = SSL_new(__ssl_ctx);
+	if(__ssl == nullptr) {
+		__error_info = slim::ErrorInfo(errno, std::format("{} => unable to create SSL handle => {}", __func__, ERR_reason_error_string(ERR_get_error())));
+		return;
+	}
+	if(SSL_set_fd(__ssl, __socket_handle) == 0) {
+		__error_info = slim::ErrorInfo(errno, std::format("{} => unable to bind SSL to socket => {}", __func__, ERR_reason_error_string(ERR_get_error())));
+		return;
+	}
+	SSL_set_tlsext_host_name(__ssl, _host.data());
+	auto ssl_result = SSL_connect(__ssl);
+	if(ssl_result != 1) {
+		auto ssl_error = SSL_get_error(__ssl, ssl_result);
+		__error_info = slim::ErrorInfo(ssl_error, std::format("{} => SSL handshake failed => {}", __func__, ERR_reason_error_string(ERR_get_error())));
+	}
+}
+#endif
+
 slim::common::network::client::tcp::Connection::~Connection() {
+#ifdef SLIM_TLS_ENABLED
+	if(__ssl != nullptr) {
+		SSL_shutdown(__ssl);
+		SSL_free(__ssl);
+	}
+	if(__ssl_ctx != nullptr && __owns_ssl_ctx) {
+		SSL_CTX_free(__ssl_ctx);
+	}
+#endif
 	close(__socket_handle);
 	if(__addrinfo != nullptr) {
 		freeaddrinfo(__addrinfo);
@@ -117,7 +171,12 @@ slim::SlimValue slim::common::network::client::tcp::Connection::read(const int _
 		}
 		auto offset = container.size();
 		container.resize(offset + BUFFER_SIZE);
+#ifdef SLIM_TLS_ENABLED
+		auto bytes_read = __is_tls ? SSL_read(__ssl, container.data() + offset, BUFFER_SIZE)
+		                           : ::read(__socket_handle, container.data() + offset, BUFFER_SIZE);
+#else
 		auto bytes_read = ::read(__socket_handle, container.data() + offset, BUFFER_SIZE);
+#endif
 		if(bytes_read > 0) {
 			container.resize(offset + static_cast<size_t>(bytes_read));
 		}
@@ -127,6 +186,16 @@ slim::SlimValue slim::common::network::client::tcp::Connection::read(const int _
 		}
 		else {
 			container.resize(offset);
+#ifdef SLIM_TLS_ENABLED
+			if(__is_tls) {
+				auto ssl_error = SSL_get_error(__ssl, bytes_read);
+				if(ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE) {
+					break;
+				}
+				result.set_error(slim::ErrorInfo(ssl_error, std::format("{} => SSL read failed => {}", __func__, ERR_reason_error_string(ERR_get_error()))));
+				break;
+			}
+#endif
 			if(errno == EAGAIN || errno == EWOULDBLOCK) {
 				break;
 			}
@@ -153,8 +222,24 @@ slim::SlimValue slim::common::network::client::tcp::Connection::write(std::strin
 			result.set_error(slim::ErrorInfo(errno, std::format("{} => poll failed => {}", __func__, strerror(errno))));
 			break;
 		}
+#ifdef SLIM_TLS_ENABLED
+		auto bytes_sent = __is_tls ? SSL_write(__ssl, _payload.data() + total_sent, static_cast<int>(_payload.size() - total_sent))
+		                           : send(__socket_handle, _payload.data() + total_sent, _payload.size() - total_sent, 0);
+#else
 		auto bytes_sent = send(__socket_handle, _payload.data() + total_sent, _payload.size() - total_sent, 0);
+#endif
 		if(bytes_sent < 0) {
+#ifdef SLIM_TLS_ENABLED
+			if(__is_tls) {
+				auto ssl_error = SSL_get_error(__ssl, bytes_sent);
+				if(ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE) {
+					continue;
+				}
+				result = false;
+				result.set_error(slim::ErrorInfo(ssl_error, std::format("{} => SSL write failed => {}", __func__, ERR_reason_error_string(ERR_get_error()))));
+				break;
+			}
+#endif
 			if(errno == EAGAIN || errno == EWOULDBLOCK) {
 				continue;
 			}
