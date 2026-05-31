@@ -19,7 +19,7 @@ int main() {
 			log::info(response.to_string());
 		}
 	}
-	auto bad_connection = network::client::tcp::Connection("example.com", 8);
+	auto bad_connection = network::client::tcp::Connection("example.com", 8, false, 500);
 	if(bad_connection.has_error()) {
 		log::info(std::to_string(bad_connection.get_error().code()));
 		log::info(bad_connection.get_error().message());
