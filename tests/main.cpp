@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <slim/common/network/client/tcp.h>
 #include <slim/SlimValue.hpp>
 
@@ -21,12 +22,25 @@ TEST_CASE("valid host port 80 [tcp]") {
 }
 
 TEST_CASE("valid host write and read port 80 [tcp]") {
-	auto connection = Connection("example.com", 80);
+	const int timeout_ms = 500;
+
+	auto connect_start = std::chrono::steady_clock::now();
+	auto connection = Connection("example.com", 80, false, timeout_ms);
+	auto connect_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - connect_start).count();
 	REQUIRE_FALSE(connection.has_error());
-	auto result = connection.write(request);
+	CHECK(connect_elapsed < timeout_ms + 50);
+
+	auto write_start = std::chrono::steady_clock::now();
+	auto result = connection.write(request, timeout_ms);
+	auto write_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - write_start).count();
 	REQUIRE(result);
-	auto response = connection.read();
+	CHECK(write_elapsed < timeout_ms + 50);
+
+	auto read_start = std::chrono::steady_clock::now();
+	auto response = connection.read(timeout_ms);
+	auto read_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - read_start).count();
 	REQUIRE(response.to_string().starts_with("HTTP/1.1 200 OK"));
+	CHECK(read_elapsed < timeout_ms + 50);
 }
 
 TEST_CASE("invalid host [tcp]") {
@@ -35,9 +49,13 @@ TEST_CASE("invalid host [tcp]") {
 }
 
 TEST_CASE("invalid port [tcp]") {
-	auto connection = Connection("example.com", 1234, false, 1000);
+	const int timeout_ms = 500;
+	auto start = std::chrono::steady_clock::now();
+	auto connection = Connection("example.com", 1234, false, timeout_ms);
+	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
 	REQUIRE(connection.has_error());
 	CHECK(connection.get_error().code() == 110);
+	CHECK(elapsed < timeout_ms + 50);
 }
 
 TEST_CASE("empty write [tcp]") {
