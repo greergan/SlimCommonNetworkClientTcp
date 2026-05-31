@@ -1,0 +1,2 @@
+CPP_FLAGS -I/usr/local/include
+LD_FLAGS -L/usr/local/lib -lssl -lcrypto
