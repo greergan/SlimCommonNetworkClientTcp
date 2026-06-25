@@ -19,26 +19,29 @@ namespace slim::common::network::client::tcp {
     class Connection {
         public:
             Connection() = delete;
-            Connection(std::string_view host, const uint16_t port, const bool is_tls = false, const int timeout_ms = 5000);
+            Connection(std::string_view host, uint16_t port, bool is_tls = false, int timeout_ms = 5000);
 #ifdef SLIM_TLS_ENABLED
-            Connection(std::string_view host, const uint16_t port, SSL_CTX* ssl_ctx, const int timeout_ms = 5000);
+            Connection(std::string_view host, uint16_t port, SSL_CTX* ssl_ctx, int timeout_ms = 5000);
 #endif
             ~Connection();
-            network::ErrorStatus read(std::vector<uint8_t>& buf, const int timeout_ms = 5000);
-            network::ErrorStatus write(std::string_view payload, std::vector<uint8_t>& buf, const int timeout_ms = 5000);
+            network::ErrorStatus read(std::vector<uint8_t>& buf, int timeout_ms = 5000);
+            network::ErrorStatus write(std::string_view payload, int timeout_ms = 5000);
         private:
-            int socket_handle_                  = 0;
+            int                socket_handle_   = 0;
             struct sockaddr_in server_address_;
-            struct addrinfo* addrinfo_          = nullptr;
-            bool is_tls_                        = false;
+            struct addrinfo*   addrinfo_        = nullptr;
+            std::string        host_;
+            uint16_t           port_            = 0;
+            bool               is_tls_          = false;
+            int                timeout_ms_      = 5000;
 #ifdef SLIM_TLS_ENABLED
-            SSL_CTX* ssl_ctx_                   = nullptr;
-            SSL*     ssl_                       = nullptr;
-            bool     owns_ssl_ctx_              = false;
-            void init_tls(std::string_view host, const int timeout_ms);
+            SSL_CTX*           ssl_ctx_         = nullptr;
+            SSL*               ssl_             = nullptr;
+            bool               owns_ssl_ctx_    = false;
+            void init_tls();
             static std::once_flag ssl_init_flag_;
 #endif
-            void init_socket(std::string_view host, const uint16_t port, const int timeout_ms);
+            void init_socket();
     };
 }
 #endif // SLIM_COMMON_NETWORK_CLIENT_TCP_H

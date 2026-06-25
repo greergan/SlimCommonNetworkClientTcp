@@ -13,8 +13,8 @@ TEST_CASE("tcp connection", "[tcp]") {
     SECTION("valid ip address port 80") {
         std::vector<uint8_t> buf;
         auto connection = Connection("172.66.147.243", 80);
-        REQUIRE_NOTHROW(connection.write(request, buf));
-        REQUIRE(connection.write(request, buf) == ErrorStatus::OK);
+        REQUIRE_NOTHROW(connection.write(request));
+        REQUIRE(connection.write(request) == ErrorStatus::OK);
         REQUIRE(connection.read(buf) == ErrorStatus::OK);
         REQUIRE(std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 200 OK"));
     }
@@ -39,15 +39,14 @@ TEST_CASE("tcp connection", "[tcp]") {
 
 TEST_CASE("tcp write", "[tcp]") {
     SECTION("empty write") {
-        std::vector<uint8_t> buf;
         auto connection = Connection("example.com", 80);
-        REQUIRE(connection.write("", buf) == ErrorStatus::OK);
+        REQUIRE(connection.write("") == ErrorStatus::OK);
     }
 
     SECTION("bad request returns 404") {
         std::vector<uint8_t> buf;
         auto connection = Connection("example.com", 80);
-        REQUIRE(connection.write(bad_request, buf) == ErrorStatus::OK);
+        REQUIRE(connection.write(bad_request) == ErrorStatus::OK);
         REQUIRE(connection.read(buf) == ErrorStatus::OK);
         REQUIRE(std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 404"));
     }
@@ -74,10 +73,9 @@ TEST_CASE("tcp timeout", "[tcp]") {
     }
 
     SECTION("write within timeout") {
-        std::vector<uint8_t> buf;
         auto connection = Connection("example.com", 80, false, timeout_ms);
         auto start = std::chrono::steady_clock::now();
-        REQUIRE(connection.write(request, buf, timeout_ms) == ErrorStatus::OK);
+        REQUIRE(connection.write(request, timeout_ms) == ErrorStatus::OK);
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start).count();
         CHECK(elapsed < timeout_ms + 50);
@@ -86,8 +84,7 @@ TEST_CASE("tcp timeout", "[tcp]") {
     SECTION("read within timeout") {
         std::vector<uint8_t> buf;
         auto connection = Connection("example.com", 80, false, timeout_ms);
-        connection.write(request, buf, timeout_ms);
-        buf.clear();
+        connection.write(request, timeout_ms);
         auto start = std::chrono::steady_clock::now();
         REQUIRE(connection.read(buf, timeout_ms) == ErrorStatus::OK);
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -102,7 +99,7 @@ TEST_CASE("tcp tls", "[tcp][tls]") {
     SECTION("valid host port 443") {
         std::vector<uint8_t> buf;
         auto connection = Connection("example.com", 443, true);
-        REQUIRE(connection.write(request, buf) == ErrorStatus::OK);
+        REQUIRE(connection.write(request) == ErrorStatus::OK);
         REQUIRE(connection.read(buf) == ErrorStatus::OK);
         REQUIRE(std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 200 OK"));
     }
@@ -114,14 +111,14 @@ TEST_CASE("tcp tls", "[tcp][tls]") {
         {
             std::vector<uint8_t> buf;
             auto connection = Connection("example.com", 443, ctx);
-            REQUIRE(connection.write(request, buf) == ErrorStatus::OK);
+            REQUIRE(connection.write(request) == ErrorStatus::OK);
             REQUIRE(connection.read(buf) == ErrorStatus::OK);
             REQUIRE(std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 200 OK"));
         }
         {
             std::vector<uint8_t> buf;
             auto connection = Connection("example.com", 443, ctx);
-            REQUIRE(connection.write(request, buf) == ErrorStatus::OK);
+            REQUIRE(connection.write(request) == ErrorStatus::OK);
             REQUIRE(connection.read(buf) == ErrorStatus::OK);
             REQUIRE(std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 200 OK"));
         }
