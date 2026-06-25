@@ -1,2 +1,2 @@
-CPP_FLAGS -I/usr/local/include -DSLIM_TLS_ENABLED
-LD_FLAGS -L/usr/local/lib -lssl -lcrypto
+CPP_FLAGS -DSLIM_TLS_ENABLED
+LD_FLAGS -lssl -lcrypto

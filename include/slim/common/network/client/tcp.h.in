@@ -1,51 +1,44 @@
-#ifndef __SLIM__COMMON__NETWORK__CLIENT__TCP__H
-#define __SLIM__COMMON__NETWORK__CLIENT__TCP__H
-
+#ifndef SLIM_COMMON_NETWORK_CLIENT_TCP_H
+#define SLIM_COMMON_NETWORK_CLIENT_TCP_H
 #include <netdb.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-
 #ifdef SLIM_TLS_ENABLED
 #include <mutex>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #endif
-
+#include <cstdint>
 #include <string_view>
-#include <slim/SlimValue.hpp>
-
+#include <vector>
+#include <slim/common/network/error_codes.h>
 #define SLIMCOMMONNETWORKCLIENTTCP_VERSION "@SLIMCOMMONNETWORKCLIENTTCP_VERSION@"
 #define SLIMCOMMONNETWORKCLIENTTCP_GIT_HASH "@SLIMCOMMONNETWORKCLIENTTCP_GIT_HASH@"
-
 namespace slim::common::network::client::tcp {
-	constexpr size_t BUFFER_SIZE = 1024;
-	struct Connection {
-		Connection() = delete;
-		Connection(std::string_view _host, const uint16_t _port, const bool _is_tls = false, const int _timeout_ms = 5000);
+    constexpr size_t BUFFER_SIZE = 1024;
+    class Connection {
+        public:
+            Connection() = delete;
+            Connection(std::string_view host, const uint16_t port, const bool is_tls = false, const int timeout_ms = 5000);
 #ifdef SLIM_TLS_ENABLED
-		Connection(std::string_view _host, const uint16_t _port, SSL_CTX* _ssl_ctx, const int _timeout_ms = 5000);
+            Connection(std::string_view host, const uint16_t port, SSL_CTX* ssl_ctx, const int timeout_ms = 5000);
 #endif
-		~Connection();
-		slim::ErrorInfo get_error() const;
-		bool has_error() const;
-		slim::SlimValue read(const int _timeout_ms = 5000);
-		slim::SlimValue write(std::string_view _payload, const int _timeout_ms = 5000);
-
-		private:
-			int __socket_handle = 0;
-			struct sockaddr_in __server_address;
-			struct addrinfo* __addrinfo = nullptr;
-			bool __is_tls = false;
-			slim::ErrorInfo __error_info;
+            ~Connection();
+            network::ErrorStatus read(std::vector<uint8_t>& buf, const int timeout_ms = 5000);
+            network::ErrorStatus write(std::string_view payload, std::vector<uint8_t>& buf, const int timeout_ms = 5000);
+        private:
+            int socket_handle_                  = 0;
+            struct sockaddr_in server_address_;
+            struct addrinfo* addrinfo_          = nullptr;
+            bool is_tls_                        = false;
 #ifdef SLIM_TLS_ENABLED
-			SSL_CTX* __ssl_ctx      = nullptr;
-			SSL*     __ssl          = nullptr;
-			bool     __owns_ssl_ctx = false;
-			void __init_tls(std::string_view _host, const int _timeout_ms);
-			static std::once_flag __ssl_init_flag;
+            SSL_CTX* ssl_ctx_                   = nullptr;
+            SSL*     ssl_                       = nullptr;
+            bool     owns_ssl_ctx_              = false;
+            void init_tls(std::string_view host, const int timeout_ms);
+            static std::once_flag ssl_init_flag_;
 #endif
-			void __init_socket(std::string_view _host, const uint16_t _port, const int _timeout_ms);
-	};
+            void init_socket(std::string_view host, const uint16_t port, const int timeout_ms);
+    };
 }
-
-#endif
+#endif // SLIM_COMMON_NETWORK_CLIENT_TCP_H
