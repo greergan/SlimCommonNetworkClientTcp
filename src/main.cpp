@@ -18,7 +18,7 @@ std::once_flag Connection::ssl_init_flag_;
 Connection::Connection(std::string_view host, const uint16_t port, const bool is_tls, const int timeout_ms)
     : host_(host), port_(port), is_tls_(is_tls), timeout_ms_(timeout_ms) {
 #ifndef SLIM_TLS_ENABLED
-    if(is_tls_) throw network::NetworkException(network::ErrorStatus::TlsNotSupported);
+    if(is_tls_) throw network::NetworkException(network::ErrorStatus::TlsNotSupported, std::format("{}:{}", host_, port_));
 #endif
     init_socket();
 #ifdef SLIM_TLS_ENABLED
@@ -74,7 +74,8 @@ void Connection::init_socket() {
                 server_address_.sin_port = htons(port_);
             }
             else {
-                throw network::NetworkException(network::ErrorStatus::SocketAddressResolutionFailed, gai_strerror(address_info_errno));
+                throw network::NetworkException(network::ErrorStatus::SocketAddressResolutionFailed,
+                    std::format("{}:{} => {}", host_, port_, gai_strerror(address_info_errno)));
             }
         }
         break;
@@ -83,33 +84,42 @@ void Connection::init_socket() {
             server_address_.sin_addr = ip_addr;
             break;
         default:
-            throw network::NetworkException(network::ErrorStatus::SocketAddressConversionFailed, strerror(errno));
+            throw network::NetworkException(network::ErrorStatus::SocketAddressConversionFailed,
+                std::format("{}:{} => {}", host_, port_, strerror(errno)));
     }
 
     if(valid_host) {
         socket_handle_ = socket(AF_INET, SOCK_STREAM, 0);
-        if(socket_handle_ < 0) throw network::NetworkException(network::ErrorStatus::SocketCreationFailed, strerror(errno));
+        if(socket_handle_ < 0)
+            throw network::NetworkException(network::ErrorStatus::SocketCreationFailed,
+                std::format("{}:{} => {}", host_, port_, strerror(errno)));
 
         auto flags = fcntl(socket_handle_, F_GETFL, 0);
-        if(flags == -1) throw network::NetworkException(network::ErrorStatus::SocketFlagGetFailed, strerror(errno));
+        if(flags == -1)
+            throw network::NetworkException(network::ErrorStatus::SocketFlagGetFailed,
+                std::format("{}:{} => {}", host_, port_, strerror(errno)));
 
         if(fcntl(socket_handle_, F_SETFL, flags | O_NONBLOCK) == -1)
-            throw network::NetworkException(network::ErrorStatus::SocketFlagSetFailed, strerror(errno));
+            throw network::NetworkException(network::ErrorStatus::SocketFlagSetFailed,
+                std::format("{}:{} => {}", host_, port_, strerror(errno)));
 
         connect(socket_handle_, (struct sockaddr*)&server_address_, sizeof(server_address_));
         struct pollfd pfd = { socket_handle_, POLLOUT, 0 };
         auto poll_result = poll(&pfd, 1, timeout_ms_);
 
         if(poll_result == 0)
-            throw network::NetworkException(network::ErrorStatus::SocketConnectionTimedOut, std::format("{}:{}", host_, port_));
+            throw network::NetworkException(network::ErrorStatus::SocketConnectionTimedOut,
+                std::format("{}:{}", host_, port_));
         else if(poll_result < 0)
-            throw network::NetworkException(network::ErrorStatus::SocketPollFailed, strerror(errno));
+            throw network::NetworkException(network::ErrorStatus::SocketPollFailed,
+                std::format("{}:{} => {}", host_, port_, strerror(errno)));
 
         int so_error = 0;
         socklen_t len = sizeof(so_error);
         getsockopt(socket_handle_, SOL_SOCKET, SO_ERROR, &so_error, &len);
         if(so_error != 0)
-            throw network::NetworkException(network::ErrorStatus::SocketConnectionFailed, std::format("{}:{} => {}", host_, port_, strerror(so_error)));
+            throw network::NetworkException(network::ErrorStatus::SocketConnectionFailed,
+                std::format("{}:{} => {}", host_, port_, strerror(so_error)));
     }
 }
 
@@ -159,7 +169,7 @@ void Connection::init_tls() {
 }
 #endif
 
-network::ErrorStatus Connection::read(std::vector<uint8_t>& buf, const int timeout_ms) {
+network::ErrorStatus Connection::read(std::vector<uint8_t>& buf, const int timeout_ms) noexcept {
     while(true) {
         struct pollfd pfd = { socket_handle_, POLLIN, 0 };
         auto poll_result = poll(&pfd, 1, timeout_ms);
@@ -167,7 +177,9 @@ network::ErrorStatus Connection::read(std::vector<uint8_t>& buf, const int timeo
         else if(poll_result < 0) return network::ErrorStatus::ReadPollFailed;
 
         auto offset = buf.size();
-        buf.resize(offset + BUFFER_SIZE);
+        try { buf.resize(offset + BUFFER_SIZE); }
+        catch(const std::bad_alloc&) { return network::ErrorStatus::OutOfMemory; }
+
 #ifdef SLIM_TLS_ENABLED
         int bytes_read = is_tls_ ? SSL_read(ssl_, buf.data() + offset, BUFFER_SIZE)
                                  : static_cast<int>(::read(socket_handle_, buf.data() + offset, BUFFER_SIZE));
@@ -175,7 +187,8 @@ network::ErrorStatus Connection::read(std::vector<uint8_t>& buf, const int timeo
         auto bytes_read = ::read(socket_handle_, buf.data() + offset, BUFFER_SIZE);
 #endif
         if(bytes_read > 0) {
-            buf.resize(offset + static_cast<size_t>(bytes_read));
+            try { buf.resize(offset + static_cast<size_t>(bytes_read)); }
+            catch(const std::bad_alloc&) { return network::ErrorStatus::OutOfMemory; }
         }
         else if(bytes_read == 0) {
             buf.resize(offset);
@@ -197,7 +210,7 @@ network::ErrorStatus Connection::read(std::vector<uint8_t>& buf, const int timeo
     return network::ErrorStatus::OK;
 }
 
-network::ErrorStatus Connection::write(std::string_view payload, const int timeout_ms) {
+network::ErrorStatus Connection::write(std::string_view payload, const int timeout_ms) noexcept {
     size_t total_sent = 0;
     while(total_sent < payload.size()) {
         struct pollfd pfd = { socket_handle_, POLLOUT, 0 };
@@ -206,8 +219,9 @@ network::ErrorStatus Connection::write(std::string_view payload, const int timeo
         else if(poll_result < 0) return network::ErrorStatus::WritePollFailed;
 
 #ifdef SLIM_TLS_ENABLED
-        int bytes_sent = is_tls_ ? SSL_write(ssl_, payload.data() + total_sent, static_cast<int>(payload.size() - total_sent))
-                                 : static_cast<int>(send(socket_handle_, payload.data() + total_sent, payload.size() - total_sent, 0));
+        int bytes_sent = is_tls_
+            ? SSL_write(ssl_, payload.data() + total_sent, static_cast<int>(payload.size() - total_sent))
+            : static_cast<int>(send(socket_handle_, payload.data() + total_sent, payload.size() - total_sent, 0));
 #else
         auto bytes_sent = send(socket_handle_, payload.data() + total_sent, payload.size() - total_sent, 0);
 #endif

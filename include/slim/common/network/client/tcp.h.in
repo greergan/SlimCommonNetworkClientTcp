@@ -24,8 +24,8 @@ namespace slim::common::network::client::tcp {
             Connection(std::string_view host, uint16_t port, SSL_CTX* ssl_ctx, int timeout_ms = 5000);
 #endif
             ~Connection();
-            network::ErrorStatus read(std::vector<uint8_t>& buf, int timeout_ms = 5000);
-            network::ErrorStatus write(std::string_view payload, int timeout_ms = 5000);
+            network::ErrorStatus read(std::vector<uint8_t>& buf, int timeout_ms = 5000) noexcept;
+            network::ErrorStatus write(std::string_view payload, int timeout_ms = 5000) noexcept;
         private:
             int                socket_handle_   = 0;
             struct sockaddr_in server_address_;
