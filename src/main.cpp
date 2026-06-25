@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <format>
+#include <span>
 #include <slim/common/network/client/tcp.h>
 
 namespace slim::common::network::client::tcp {
@@ -211,6 +212,10 @@ network::ErrorStatus Connection::read(std::vector<uint8_t>& buf, const int timeo
 }
 
 network::ErrorStatus Connection::write(std::string_view payload, const int timeout_ms) noexcept {
+    return write(std::span<uint8_t>(reinterpret_cast<uint8_t*>(const_cast<char*>(payload.data())), payload.size()), timeout_ms);
+}
+
+network::ErrorStatus Connection::write(std::span<uint8_t> payload, const int timeout_ms) noexcept {
     size_t total_sent = 0;
     while(total_sent < payload.size()) {
         struct pollfd pfd = { socket_handle_, POLLOUT, 0 };
