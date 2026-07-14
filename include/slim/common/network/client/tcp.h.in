@@ -46,6 +46,14 @@ public:
         SSL_CTX*                     ssl_ctx,
         std::chrono::milliseconds    timeout = std::chrono::seconds(5));
 
+    // Async factory — accepted fd from a TCP server connection handler.
+    // Takes ownership of fd. ssl_ctx != nullptr triggers a server-side TLS handshake.
+    static slim::common::io::Task<Connection> create(
+        slim::common::io::Scheduler& scheduler,
+        int                          fd,
+        SSL_CTX*                     ssl_ctx = nullptr,
+        std::chrono::milliseconds    timeout = std::chrono::seconds(5));
+
     network::ErrorStatus read(std::vector<uint8_t>& buf,
                               std::chrono::milliseconds timeout = std::chrono::seconds(5)) noexcept;
     network::ErrorStatus write(std::string_view payload,

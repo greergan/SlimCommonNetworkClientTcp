@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
+#include <sys/socket.h>
 #include <slim/common/io.h>
 #include <slim/common/io/scheduler.h>
 #include <slim/common/network/client/tcp.h>
@@ -182,5 +183,35 @@ TEST_CASE("tcp tls", "[tcp][tls]") {
         }
 
         SSL_CTX_free(ssl_ctx);
+    }
+}
+
+TEST_CASE("tcp server handoff", "[tcp]") {
+    SECTION("plain accepted fd — read and write") {
+        int sv[2];
+        REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+        // sv[0] = server side (handed to Connection), sv[1] = peer
+        ::send(sv[1], request.data(), request.size(), 0);
+
+        SchedCtx ctx;
+        Connection* conn_ptr = nullptr;
+        ctx.sched.spawn([&]() -> slim::common::io::Task<void> {
+            auto c = co_await Connection::create(ctx.sched, sv[0]);
+            conn_ptr = &c;
+        }());
+        ctx.sched.shutdown();
+        auto conn = std::move(*conn_ptr);
+
+        std::vector<uint8_t> buf;
+        REQUIRE(conn.read(buf) == ErrorStatus::OK);
+        REQUIRE(std::string(buf.begin(), buf.end()) == request);
+
+        REQUIRE(conn.write(request) == ErrorStatus::OK);
+        char peer_buf[4096]{};
+        ssize_t n = ::recv(sv[1], peer_buf, sizeof(peer_buf), 0);
+        REQUIRE(n == static_cast<ssize_t>(request.size()));
+        REQUIRE(std::string(peer_buf, static_cast<size_t>(n)) == request);
+
+        ::close(sv[1]);
     }
 }

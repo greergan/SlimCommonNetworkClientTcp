@@ -133,18 +133,14 @@ Task<void> Connection::tls_async(SSL_CTX* ssl_ctx, std::chrono::milliseconds tim
 
 // ─── Factories ───────────────────────────────────────────────────────────────
 
-Task<Connection> Connection::create(
-        Scheduler& scheduler,
-        std::string_view host, uint16_t port,
-        std::chrono::milliseconds timeout) {
+Task<Connection> Connection::create(Scheduler& scheduler, std::string_view host, uint16_t port, std::chrono::milliseconds timeout) {
     Connection c(scheduler, host, port);
     c.resolve_and_create_socket();
     co_await c.connect_async(timeout);
     co_return std::move(c);
 }
 
-Task<Connection> Connection::create(
-        Scheduler& scheduler,
+Task<Connection> Connection::create(Scheduler& scheduler,
         std::string_view host, uint16_t port,
         SSL_CTX* ssl_ctx,
         std::chrono::milliseconds timeout) {
@@ -152,6 +148,19 @@ Task<Connection> Connection::create(
     c.resolve_and_create_socket();
     co_await c.connect_async(timeout);
     co_await c.tls_async(ssl_ctx, timeout);
+    co_return std::move(c);
+}
+
+// Async factory — accepted fd from a TCP server connection handler
+Task<Connection> Connection::create(
+        Scheduler& scheduler,
+        int fd,
+        SSL_CTX* ssl_ctx,
+        std::chrono::milliseconds timeout) {
+    Connection c(scheduler, {}, 0);
+    c.socket_fd_ = fd;
+    if (ssl_ctx != nullptr)
+        co_await c.tls_async(ssl_ctx, timeout);
     co_return std::move(c);
 }
 
