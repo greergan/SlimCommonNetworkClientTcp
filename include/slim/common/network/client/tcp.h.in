@@ -1,49 +1,79 @@
 #ifndef SLIM_COMMON_NETWORK_CLIENT_TCP_H
 #define SLIM_COMMON_NETWORK_CLIENT_TCP_H
+
 #include <netdb.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#ifdef SLIM_TLS_ENABLED
-#include <mutex>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-#endif
 #include <cstdint>
+#include <chrono>
 #include <span>
 #include <string_view>
 #include <vector>
+#include <slim/common/io/scheduler.h>
+#include <slim/common/io/task.h>
 #include <slim/common/network/error_codes.h>
-#define SLIMCOMMONNETWORKCLIENTTCP_VERSION "@SLIMCOMMONNETWORKCLIENTTCP_VERSION@"
+
+#define SLIMCOMMONNETWORKCLIENTTCP_VERSION  "@SLIMCOMMONNETWORKCLIENTTCP_VERSION@"
 #define SLIMCOMMONNETWORKCLIENTTCP_GIT_HASH "@SLIMCOMMONNETWORKCLIENTTCP_GIT_HASH@"
+
 namespace slim::common::network::client::tcp {
-    constexpr size_t BUFFER_SIZE = 8192;
-    class Connection {
-        public:
-            Connection() = delete;
-            Connection(std::string_view host, uint16_t port, bool is_tls = false, int timeout_ms = 5000);
-#ifdef SLIM_TLS_ENABLED
-            Connection(std::string_view host, uint16_t port, SSL_CTX* ssl_ctx, int timeout_ms = 5000);
-#endif
-            ~Connection();
-            network::ErrorStatus read(std::vector<uint8_t>& buf, int timeout_ms = 5000) noexcept;
-            network::ErrorStatus write(std::string_view payload, int timeout_ms = 5000) noexcept;
-            network::ErrorStatus write(std::span<uint8_t> payload, int timeout_ms = 5000) noexcept;
-        private:
-            int                socket_handle_   = 0;
-            struct sockaddr_in server_address_;
-            struct addrinfo*   addrinfo_        = nullptr;
-            std::string        host_;
-            uint16_t           port_            = 0;
-            bool               is_tls_          = false;
-            int                timeout_ms_      = 5000;
-#ifdef SLIM_TLS_ENABLED
-            SSL_CTX*           ssl_ctx_         = nullptr;
-            SSL*               ssl_             = nullptr;
-            bool               owns_ssl_ctx_    = false;
-            void init_tls();
-            static std::once_flag ssl_init_flag_;
-#endif
-            void init_socket();
-    };
-}
+
+constexpr size_t BUFFER_SIZE = 8192;
+
+class Connection {
+public:
+    ~Connection();
+    Connection()                             = default;
+    Connection(const Connection&)            = delete;
+    Connection& operator=(const Connection&) = delete;
+    Connection(Connection&&) noexcept;
+    Connection& operator=(Connection&&)      = delete;
+
+    // Async factory — plain TCP
+    static slim::common::io::Task<Connection> create(
+        slim::common::io::Scheduler& scheduler,
+        std::string_view             host,
+        uint16_t                     port,
+        std::chrono::milliseconds    timeout = std::chrono::seconds(5));
+
+    // Async factory — TLS (caller owns ssl_ctx)
+    static slim::common::io::Task<Connection> create(
+        slim::common::io::Scheduler& scheduler,
+        std::string_view             host,
+        uint16_t                     port,
+        SSL_CTX*                     ssl_ctx,
+        std::chrono::milliseconds    timeout = std::chrono::seconds(5));
+
+    network::ErrorStatus read(std::vector<uint8_t>& buf,
+                              std::chrono::milliseconds timeout = std::chrono::seconds(5)) noexcept;
+    network::ErrorStatus write(std::string_view payload,
+                               std::chrono::milliseconds timeout = std::chrono::seconds(5)) noexcept;
+    network::ErrorStatus write(std::span<uint8_t> payload,
+                               std::chrono::milliseconds timeout = std::chrono::seconds(5)) noexcept;
+
+private:
+    explicit Connection(slim::common::io::Scheduler& scheduler, std::string_view host, uint16_t port);
+
+    slim::common::io::Scheduler& scheduler_;
+    int                          socket_fd_   {-1};
+    struct addrinfo*             addrinfo_    {nullptr};
+    struct sockaddr_in           server_addr_ {};
+    std::string                  host_;
+    uint16_t                     port_        {0};
+    bool                         is_tls_      {false};
+    // Non-null only when kTLS setup failed and we fall back to userspace TLS.
+    SSL*                         ssl_         {nullptr};
+
+    // Resolves host → server_addr_, creates a non-blocking socket → socket_fd_.
+    // Synchronous (DNS); called from the factory before co_await.
+    void resolve_and_create_socket();
+
+    slim::common::io::Task<void> connect_async(std::chrono::milliseconds timeout);
+    slim::common::io::Task<void> tls_async(SSL_CTX* ssl_ctx, std::chrono::milliseconds timeout);
+};
+
+} // namespace slim::common::network::client::tcp
+
 #endif // SLIM_COMMON_NETWORK_CLIENT_TCP_H

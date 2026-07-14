@@ -1,2 +1,4 @@
 # PackageName [minVersion [maxVersion]]
-SlimCommonNetwork 0.10.0
+SlimCommonNetwork
+SlimCommonIo
+SlimCommonTls
