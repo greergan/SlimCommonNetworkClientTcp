@@ -41,13 +41,14 @@ TLS support requires OpenSSL and a caller-supplied `SSL_CTX`.
 | Async I/O | Built on `io_uring` via `slim::common::io::Scheduler` |
 | Async factories | `Connection::create` is a coroutine — construction never blocks the caller's thread |
 | Per-call timeouts | `read` and `write` accept a `std::chrono::milliseconds` timeout |
-| TLS support | Optional OpenSSL TLS via caller-supplied `SSL_CTX`; kTLS used when available |
+| TLS support | Optional OpenSSL TLS via caller-supplied `SSL_CTX`; kTLS used when available, with automatic fallback to userspace TLS |
 | Dual write interface | Accepts both `std::string_view` and `std::span<uint8_t>` payloads |
 | `noexcept` I/O | `read` and `write` never throw; all errors returned as `ErrorStatus` |
 | Out-of-memory safety | `read` catches `std::bad_alloc` on buffer growth and returns `ErrorStatus::OutOfMemory` |
 | Identifying error messages | All exceptions include `host:port` and the underlying system or OpenSSL error string |
 | Error model | Strong enum-based status reporting via `ErrorStatus` (from [SlimCommonNetwork](https://codeberg.org/greergan/SlimCommonNetwork)) |
 | Value semantics | `Connection` is movable; factories return by value via `co_return` |
+| Server-side accepted connections | fd-based factory accepts an already-connected socket from a TCP server, with optional server-side TLS handshake |
 
 [↑ Top](#table-of-contents)
 
@@ -95,10 +96,11 @@ Construction is asynchronous. Use the static `create` factory inside a coroutine
 | Form | Description |
 |------|-------------|
 | `Task<Connection> create(Scheduler&, string_view host, uint16_t port, milliseconds timeout = 5s)` | Plain TCP |
-| `Task<Connection> create(Scheduler&, string_view host, uint16_t port, SSL_CTX*, milliseconds timeout = 5s)` | TLS with caller-supplied `SSL_CTX`; context is not freed on destruction |
+| `Task<Connection> create(Scheduler&, string_view host, uint16_t port, SSL_CTX*, milliseconds timeout = 5s)` | TLS with caller-supplied `SSL_CTX`; kTLS used when available, falling back to userspace TLS if unavailable (`KtlsUnavailable` is not an error in this path); context is not freed on destruction |
+| `Task<Connection> create(Scheduler&, int fd, SSL_CTX* ssl_ctx = nullptr, milliseconds timeout = 5s)` | Accepted socket from a TCP server. Takes ownership of `fd`. If `ssl_ctx != nullptr`, performs a server-side TLS handshake. No host resolution is performed; `host` is empty for this form. |
 | `Connection(const Connection&)` | Deleted |
 | `Connection(Connection&&) noexcept` | Supported — returned by value from factories |
-| `Connection& operator=(Connection&&)` | Deleted |
+| `Connection& operator=(Connection&&)` | Deleted — move-assign is suppressed to enforce single-owner transfer via the factory return path only |
 
 Factories throw `NetworkException` (via the coroutine exception mechanism) on any failure. The connection is fully established, including TLS handshake if applicable, before `create` completes.
 
@@ -108,13 +110,13 @@ Factories throw `NetworkException` (via the coroutine exception mechanism) on an
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `read(std::vector<uint8_t>& buf, milliseconds timeout = 5s) noexcept` | `ErrorStatus` | Reads available data into `buf`, appending to any existing content. Returns `OK` on timeout (no data) or clean close. |
-| `write(std::string_view payload, milliseconds timeout = 5s) noexcept` | `ErrorStatus` | Sends a string payload, retrying until fully sent or an error occurs. |
-| `write(std::span<uint8_t> payload, milliseconds timeout = 5s) noexcept` | `ErrorStatus` | Sends a binary payload. `string_view` overload delegates to this. |
+| `read(std::vector<uint8_t>& buf, milliseconds timeout = 5s) noexcept` | `ErrorStatus` | Reads available data into `buf`, appending to any existing content. Returns `OK` on clean close. **Returns `OK` with no data appended on timeout** — callers must check buffer growth to distinguish timeout from data. |
+| `write(std::string_view payload, milliseconds timeout = 5s) noexcept` | `ErrorStatus` | Sends a string payload, retrying until fully sent or an error occurs. Delegates to the `span` overload. |
+| `write(std::span<uint8_t> payload, milliseconds timeout = 5s) noexcept` | `ErrorStatus` | Sends a binary payload, looping until fully sent. Handles `EAGAIN`/`EWOULDBLOCK` and TLS `WANT_READ`/`WANT_WRITE` internally. |
 
 - Both `read` and `write` are `noexcept` — errors are always returned as `ErrorStatus`, never thrown.
 - `read` uses an internal `BUFFER_SIZE` of `8192` bytes per read call and grows `buf` incrementally.
-- `write` loops until the entire payload is sent, handling `EAGAIN`/`EWOULDBLOCK` and TLS `WANT_READ`/`WANT_WRITE` internally.
+- `write` loops until the entire payload is sent, handling partial sends transparently.
 
 [↑ Top](#table-of-contents)
 
@@ -254,6 +256,41 @@ scheduler.spawn([&]() -> slim::common::io::Task<void> {
     conn.read(buf, ms(1000));
 }());
 scheduler.shutdown();
+```
+
+```cpp
+// Accepted fd from a TCP server (plain)
+scheduler.spawn([&]() -> slim::common::io::Task<void> {
+    try {
+        auto conn = co_await Connection::create(scheduler, accepted_fd);
+        std::vector<uint8_t> buf;
+        conn.read(buf);
+        conn.write(std::span<uint8_t>(buf));  // echo
+    }
+    catch (const slim::common::network::NetworkException& e) {
+        std::cerr << "Accepted connection failed: " << e.what() << '\n';
+    }
+}());
+scheduler.shutdown();
+```
+
+```cpp
+// Accepted fd from a TCP server (server-side TLS)
+SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
+// ... configure ctx with certificate and key ...
+
+scheduler.spawn([&]() -> slim::common::io::Task<void> {
+    try {
+        auto conn = co_await Connection::create(scheduler, accepted_fd, ctx);
+        std::vector<uint8_t> buf;
+        conn.read(buf);
+    }
+    catch (const slim::common::network::NetworkException& e) {
+        std::cerr << "TLS handshake failed: " << e.what() << '\n';
+    }
+}());
+scheduler.shutdown();
+// SSL_CTX_free(ctx) — caller retains ownership
 ```
 
 [↑ Top](#table-of-contents)
