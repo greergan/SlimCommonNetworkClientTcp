@@ -214,4 +214,31 @@ TEST_CASE("tcp server handoff", "[tcp]") {
 
         ::close(sv[1]);
     }
+
+    SECTION("partial read — exits without blocking") {
+        int sv[2];
+        REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+        ::send(sv[1], request.data(), request.size(), 0);
+        ::shutdown(sv[1], SHUT_WR);  // signal EOF so poll doesn't hang if break is missing
+
+        SchedCtx ctx;
+        Connection* conn_ptr = nullptr;
+        ctx.sched.spawn([&]() -> slim::common::io::Task<void> {
+            auto c = co_await Connection::create(ctx.sched, sv[0]);
+            conn_ptr = &c;
+        }());
+        ctx.sched.shutdown();
+        auto conn = std::move(*conn_ptr);
+
+        std::vector<uint8_t> buf;
+        auto start = std::chrono::steady_clock::now();
+        REQUIRE(conn.read(buf) == ErrorStatus::OK);
+        auto elapsed = std::chrono::duration_cast<ms>(
+            std::chrono::steady_clock::now() - start).count();
+
+        REQUIRE(std::string(buf.begin(), buf.end()) == request);
+        CHECK(elapsed < 100);
+
+        ::close(sv[1]);
+    }
 }
