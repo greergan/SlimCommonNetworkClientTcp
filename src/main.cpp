@@ -119,13 +119,11 @@ Task<void> Connection::tls_async(SSL_CTX* ssl_ctx, std::chrono::milliseconds tim
 
     network::ErrorStatus ks = tls::setup_ktls(socket_fd_, *static_cast<tls::KeyMaterial*>(SSL_get_ex_data(ssl, tls::ssl_ex_data_index())));
     if (ks == network::ErrorStatus::KtlsUnavailable) {
-        // kTLS not available — keep ssl_ alive for userspace SSL_read/SSL_write.
         ssl_ = ssl;
     } else if (ks != network::ErrorStatus::OK) {
         SSL_free(ssl);
         throw network::NetworkException(ks, std::format("{}:{}", host_, port_));
     } else {
-        // kTLS active — kernel handles crypto; ssl handle no longer needed.
         SSL_free(ssl);
     }
     is_tls_ = true;
@@ -151,7 +149,6 @@ Task<Connection> Connection::create(Scheduler& scheduler,
     co_return std::move(c);
 }
 
-// Async factory — accepted fd from a TCP server connection handler
 Task<Connection> Connection::create(
         Scheduler& scheduler,
         int fd,
@@ -171,8 +168,6 @@ network::ErrorStatus Connection::read(std::vector<uint8_t>& buf, std::chrono::mi
         // Wait for data.
         Poll poll_op{scheduler_, socket_fd_, POLLIN};
         poll_op.with_timeout(timeout);
-        // Drive synchronously: spawn + shutdown drains only this task.
-        // read() is intentionally blocking from the caller's perspective.
         int poll_rc = 0;
         scheduler_.spawn([&]() -> Task<void> {
             poll_rc = co_await poll_op;
@@ -196,6 +191,11 @@ network::ErrorStatus Connection::read(std::vector<uint8_t>& buf, std::chrono::mi
                 if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) break;
                 return network::ErrorStatus::ReadTlsFailed;
             }
+            try { buf.resize(offset + static_cast<size_t>(bytes_read)); }
+            catch (const std::bad_alloc&) { return network::ErrorStatus::OutOfMemory; }
+
+            // partial read — socket buffer exhausted, no more data available
+            if (bytes_read < static_cast<int>(BUFFER_SIZE)) break;
         } else {
             // Plain or kTLS path — kernel decrypts transparently.
             int recv_rc = 0;
@@ -212,10 +212,13 @@ network::ErrorStatus Connection::read(std::vector<uint8_t>& buf, std::chrono::mi
                 if (bytes_read == -EAGAIN || bytes_read == -EWOULDBLOCK) break;
                 return network::ErrorStatus::ReadFailed;
             }
-        }
 
-        try { buf.resize(offset + static_cast<size_t>(bytes_read)); }
-        catch (const std::bad_alloc&) { return network::ErrorStatus::OutOfMemory; }
+            try { buf.resize(offset + static_cast<size_t>(bytes_read)); }
+            catch (const std::bad_alloc&) { return network::ErrorStatus::OutOfMemory; }
+
+            // partial read — socket buffer exhausted, no more data available
+            if (bytes_read < static_cast<int>(BUFFER_SIZE)) break;
+        }
     }
     return network::ErrorStatus::OK;
 }
