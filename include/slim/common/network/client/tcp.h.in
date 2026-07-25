@@ -1,6 +1,5 @@
 #ifndef SLIM_COMMON_NETWORK_CLIENT_TCP_H
 #define SLIM_COMMON_NETWORK_CLIENT_TCP_H
-
 #include <netdb.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -19,9 +18,7 @@
 #define SLIMCOMMONNETWORKCLIENTTCP_GIT_HASH "@SLIMCOMMONNETWORKCLIENTTCP_GIT_HASH@"
 
 namespace slim::common::network::client::tcp {
-
 constexpr size_t BUFFER_SIZE = 8192;
-
 class Connection {
 public:
     ~Connection();
@@ -31,39 +28,20 @@ public:
     Connection(Connection&&) noexcept;
     Connection& operator=(Connection&&)      = delete;
 
-    // Async factory — plain TCP
-    static slim::common::io::Task<Connection> create(
-        slim::common::io::Scheduler& scheduler,
-        std::string_view             host,
-        uint16_t                     port,
-        std::chrono::milliseconds    timeout = std::chrono::seconds(5));
+    static slim::common::io::Task<Connection> create(slim::common::io::Scheduler& scheduler, std::string_view host, uint16_t port,
+        std::chrono::milliseconds timeout = std::chrono::seconds(5));
 
-    // Async factory — TLS (caller owns ssl_ctx)
-    static slim::common::io::Task<Connection> create(
-        slim::common::io::Scheduler& scheduler,
-        std::string_view             host,
-        uint16_t                     port,
-        SSL_CTX*                     ssl_ctx,
-        std::chrono::milliseconds    timeout = std::chrono::seconds(5));
+    static slim::common::io::Task<Connection> create(slim::common::io::Scheduler& scheduler, std::string_view host, uint16_t port,
+        SSL_CTX* ssl_ctx, std::chrono::milliseconds timeout = std::chrono::seconds(5));
 
-    // Async factory — accepted fd from a TCP server connection handler.
-    // Takes ownership of fd. ssl_ctx != nullptr triggers a server-side TLS handshake.
-    static slim::common::io::Task<Connection> create(
-        slim::common::io::Scheduler& scheduler,
-        int                          fd,
-        SSL_CTX*                     ssl_ctx = nullptr,
-        std::chrono::milliseconds    timeout = std::chrono::seconds(5));
+    static slim::common::io::Task<Connection> create(slim::common::io::Scheduler& scheduler,int fd, SSL_CTX* ssl_ctx = nullptr,
+        std::chrono::milliseconds timeout = std::chrono::seconds(5));
 
-    network::ErrorStatus read(std::vector<uint8_t>& buf,
-                              std::chrono::milliseconds timeout = std::chrono::seconds(5)) noexcept;
-    network::ErrorStatus write(std::string_view payload,
-                               std::chrono::milliseconds timeout = std::chrono::seconds(5)) noexcept;
-    network::ErrorStatus write(std::span<uint8_t> payload,
-                               std::chrono::milliseconds timeout = std::chrono::seconds(5)) noexcept;
-
+    slim::common::io::Task<void> read(std::vector<uint8_t>& buf,std::chrono::milliseconds timeout = std::chrono::seconds(5));
+    slim::common::io::Task<void> write(std::string_view payload,std::chrono::milliseconds timeout = std::chrono::seconds(5));
+    slim::common::io::Task<void> write(std::span<uint8_t> payload, std::chrono::milliseconds timeout = std::chrono::seconds(5));
 private:
     explicit Connection(slim::common::io::Scheduler& scheduler, std::string_view host, uint16_t port);
-
     slim::common::io::Scheduler& scheduler_;
     int                          socket_fd_   {-1};
     struct addrinfo*             addrinfo_    {nullptr};
@@ -73,15 +51,11 @@ private:
     bool                         is_tls_      {false};
     // Non-null only when kTLS setup failed and we fall back to userspace TLS.
     SSL*                         ssl_         {nullptr};
-
     // Resolves host → server_addr_, creates a non-blocking socket → socket_fd_.
     // Synchronous (DNS); called from the factory before co_await.
     void resolve_and_create_socket();
-
     slim::common::io::Task<void> connect_async(std::chrono::milliseconds timeout);
     slim::common::io::Task<void> tls_async(SSL_CTX* ssl_ctx, std::chrono::milliseconds timeout);
 };
-
 } // namespace slim::common::network::client::tcp
-
 #endif // SLIM_COMMON_NETWORK_CLIENT_TCP_H

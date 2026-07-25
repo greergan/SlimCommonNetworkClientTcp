@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
+#include <optional>
 #include <sys/socket.h>
 #include <slim/common/io.h>
 #include <slim/common/io/scheduler.h>
@@ -13,54 +14,53 @@ using ms = std::chrono::milliseconds;
 const std::string request     = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
 const std::string bad_request = "GET /badrequest HTTP/1.1\r\nHost: example.com\r\n\r\n";
 
-// ─── SchedCtx ────────────────────────────────────────────────────────────────
+// ── SchedCtx ──────────────────────────────────────────────────────────────────
 
 struct SchedCtx {
-    slim::common::IO              io;
-    slim::common::io::Scheduler   sched{io};
+    slim::common::IO            io;
+    slim::common::io::Scheduler sched{io};
 };
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-static Connection make_plain(
-        SchedCtx& ctx,
-        std::string_view host,
-        uint16_t port,
-        ms timeout = std::chrono::seconds(5)) {
-    Connection* conn = nullptr;
-    ctx.sched.spawn([&]() -> slim::common::io::Task<void> {
-        auto c = co_await Connection::create(ctx.sched, host, port, timeout);
-        conn = &c;
+template<typename F>
+static void run(SchedCtx& ctx, F&& f) {
+    ctx.sched.spawn([f = std::forward<F>(f)]() -> slim::common::io::Task<void> {
+        co_await f();
     }());
     ctx.sched.shutdown();
-    return std::move(*conn);
 }
 
-static Connection make_tls(
-        SchedCtx& ctx,
-        std::string_view host,
-        uint16_t port,
-        SSL_CTX* ssl_ctx,
-        ms timeout = std::chrono::seconds(5)) {
-    Connection* conn = nullptr;
-    ctx.sched.spawn([&]() -> slim::common::io::Task<void> {
-        auto c = co_await Connection::create(ctx.sched, host, port, ssl_ctx, timeout);
-        conn = &c;
-    }());
-    ctx.sched.shutdown();
-    return std::move(*conn);
+static std::optional<Connection> make_plain(SchedCtx& ctx, std::string_view host, uint16_t port,
+                                            ms timeout = std::chrono::seconds(5)) {
+    std::optional<Connection> conn;
+    run(ctx, [&]() -> slim::common::io::Task<void> {
+        conn.emplace(co_await Connection::create(ctx.sched, host, port, timeout));
+    });
+    return conn;
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
+static std::optional<Connection> make_tls(SchedCtx& ctx, std::string_view host, uint16_t port,
+                                          SSL_CTX* ssl_ctx, ms timeout = std::chrono::seconds(5)) {
+    std::optional<Connection> conn;
+    run(ctx, [&]() -> slim::common::io::Task<void> {
+        conn.emplace(co_await Connection::create(ctx.sched, host, port, ssl_ctx, timeout));
+    });
+    return conn;
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 TEST_CASE("tcp connection", "[tcp]") {
     SECTION("valid ip address port 80") {
         SchedCtx ctx;
-        auto connection = make_plain(ctx, "172.66.147.243", 80);
+        auto conn = make_plain(ctx, "172.66.147.243", 80);
+        REQUIRE(conn.has_value());
         std::vector<uint8_t> buf;
-        REQUIRE_NOTHROW(connection.write(request));
-        REQUIRE(connection.write(request) == ErrorStatus::OK);
-        REQUIRE(connection.read(buf) == ErrorStatus::OK);
+        run(ctx, [&]() -> slim::common::io::Task<void> {
+            co_await conn->write(request);
+            co_await conn->read(buf);
+        });
         REQUIRE(std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 200 OK"));
     }
 
@@ -88,16 +88,22 @@ TEST_CASE("tcp connection", "[tcp]") {
 TEST_CASE("tcp write", "[tcp]") {
     SECTION("empty write") {
         SchedCtx ctx;
-        auto connection = make_plain(ctx, "example.com", 80);
-        REQUIRE(connection.write("") == ErrorStatus::OK);
+        auto conn = make_plain(ctx, "example.com", 80);
+        REQUIRE(conn.has_value());
+        REQUIRE_NOTHROW(run(ctx, [&]() -> slim::common::io::Task<void> {
+            co_await conn->write("");
+        }));
     }
 
     SECTION("bad request returns 404") {
         SchedCtx ctx;
-        auto connection = make_plain(ctx, "example.com", 80);
+        auto conn = make_plain(ctx, "example.com", 80);
+        REQUIRE(conn.has_value());
         std::vector<uint8_t> buf;
-        REQUIRE(connection.write(bad_request) == ErrorStatus::OK);
-        REQUIRE(connection.read(buf) == ErrorStatus::OK);
+        run(ctx, [&]() -> slim::common::io::Task<void> {
+            co_await conn->write(bad_request);
+            co_await conn->read(buf);
+        });
         REQUIRE(std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 404"));
     }
 }
@@ -105,9 +111,12 @@ TEST_CASE("tcp write", "[tcp]") {
 TEST_CASE("tcp read", "[tcp]") {
     SECTION("read without write returns empty") {
         SchedCtx ctx;
-        auto connection = make_plain(ctx, "example.com", 80);
+        auto conn = make_plain(ctx, "example.com", 80);
+        REQUIRE(conn.has_value());
         std::vector<uint8_t> buf;
-        REQUIRE(connection.read(buf) == ErrorStatus::OK);
+        run(ctx, [&]() -> slim::common::io::Task<void> {
+            co_await conn->read(buf);
+        });
         REQUIRE(buf.empty());
     }
 }
@@ -118,7 +127,7 @@ TEST_CASE("tcp timeout", "[tcp]") {
     SECTION("connection within timeout") {
         SchedCtx ctx;
         auto start = std::chrono::steady_clock::now();
-        auto connection = make_plain(ctx, "example.com", 80, ms(timeout_ms));
+        REQUIRE_NOTHROW(make_plain(ctx, "example.com", 80, ms(timeout_ms)));
         auto elapsed = std::chrono::duration_cast<ms>(
             std::chrono::steady_clock::now() - start).count();
         CHECK(elapsed < timeout_ms + 50);
@@ -126,9 +135,12 @@ TEST_CASE("tcp timeout", "[tcp]") {
 
     SECTION("write within timeout") {
         SchedCtx ctx;
-        auto connection = make_plain(ctx, "example.com", 80, ms(timeout_ms));
+        auto conn = make_plain(ctx, "example.com", 80, ms(timeout_ms));
+        REQUIRE(conn.has_value());
         auto start = std::chrono::steady_clock::now();
-        REQUIRE(connection.write(request, ms(timeout_ms)) == ErrorStatus::OK);
+        REQUIRE_NOTHROW(run(ctx, [&]() -> slim::common::io::Task<void> {
+            co_await conn->write(request, ms(timeout_ms));
+        }));
         auto elapsed = std::chrono::duration_cast<ms>(
             std::chrono::steady_clock::now() - start).count();
         CHECK(elapsed < timeout_ms + 50);
@@ -136,11 +148,14 @@ TEST_CASE("tcp timeout", "[tcp]") {
 
     SECTION("read within timeout") {
         SchedCtx ctx;
-        auto connection = make_plain(ctx, "example.com", 80, ms(timeout_ms));
+        auto conn = make_plain(ctx, "example.com", 80, ms(timeout_ms));
+        REQUIRE(conn.has_value());
         std::vector<uint8_t> buf;
-        connection.write(request, ms(timeout_ms));
         auto start = std::chrono::steady_clock::now();
-        REQUIRE(connection.read(buf, ms(timeout_ms)) == ErrorStatus::OK);
+        run(ctx, [&]() -> slim::common::io::Task<void> {
+            co_await conn->write(request, ms(timeout_ms));
+            co_await conn->read(buf, ms(timeout_ms));
+        });
         auto elapsed = std::chrono::duration_cast<ms>(
             std::chrono::steady_clock::now() - start).count();
         REQUIRE(std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 200 OK"));
@@ -153,10 +168,13 @@ TEST_CASE("tcp tls", "[tcp][tls]") {
         SchedCtx ctx;
         SSL_CTX* ssl_ctx = SSL_CTX_new(TLS_client_method());
         REQUIRE(ssl_ctx != nullptr);
-        auto connection = make_tls(ctx, "example.com", 443, ssl_ctx);
+        auto conn = make_tls(ctx, "example.com", 443, ssl_ctx);
+        REQUIRE(conn.has_value());
         std::vector<uint8_t> buf;
-        REQUIRE(connection.write(request) == ErrorStatus::OK);
-        REQUIRE(connection.read(buf) == ErrorStatus::OK);
+        run(ctx, [&]() -> slim::common::io::Task<void> {
+            co_await conn->write(request);
+            co_await conn->read(buf);
+        });
         REQUIRE(std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 200 OK"));
         SSL_CTX_free(ssl_ctx);
     }
@@ -164,24 +182,28 @@ TEST_CASE("tcp tls", "[tcp][tls]") {
     SECTION("shared ssl context") {
         SSL_CTX* ssl_ctx = SSL_CTX_new(TLS_client_method());
         REQUIRE(ssl_ctx != nullptr);
-
         {
             SchedCtx ctx;
-            auto connection = make_tls(ctx, "example.com", 443, ssl_ctx);
+            auto conn = make_tls(ctx, "example.com", 443, ssl_ctx);
+            REQUIRE(conn.has_value());
             std::vector<uint8_t> buf;
-            REQUIRE(connection.write(request) == ErrorStatus::OK);
-            REQUIRE(connection.read(buf) == ErrorStatus::OK);
+            run(ctx, [&]() -> slim::common::io::Task<void> {
+                co_await conn->write(request);
+                co_await conn->read(buf);
+            });
             REQUIRE(std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 200 OK"));
         }
         {
             SchedCtx ctx;
-            auto connection = make_tls(ctx, "example.com", 443, ssl_ctx);
+            auto conn = make_tls(ctx, "example.com", 443, ssl_ctx);
+            REQUIRE(conn.has_value());
             std::vector<uint8_t> buf;
-            REQUIRE(connection.write(request) == ErrorStatus::OK);
-            REQUIRE(connection.read(buf) == ErrorStatus::OK);
+            run(ctx, [&]() -> slim::common::io::Task<void> {
+                co_await conn->write(request);
+                co_await conn->read(buf);
+            });
             REQUIRE(std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 200 OK"));
         }
-
         SSL_CTX_free(ssl_ctx);
     }
 }
@@ -190,28 +212,26 @@ TEST_CASE("tcp server handoff", "[tcp]") {
     SECTION("plain accepted fd — read and write") {
         int sv[2];
         REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-        // sv[0] = server side (handed to Connection), sv[1] = peer
         ::send(sv[1], request.data(), request.size(), 0);
 
         SchedCtx ctx;
-        Connection* conn_ptr = nullptr;
-        ctx.sched.spawn([&]() -> slim::common::io::Task<void> {
-            auto c = co_await Connection::create(ctx.sched, sv[0]);
-            conn_ptr = &c;
-        }());
-        ctx.sched.shutdown();
-        auto conn = std::move(*conn_ptr);
+        std::optional<Connection> conn;
+        run(ctx, [&]() -> slim::common::io::Task<void> {
+            conn.emplace(co_await Connection::create(ctx.sched, sv[0]));
+        });
+        REQUIRE(conn.has_value());
 
         std::vector<uint8_t> buf;
-        REQUIRE(conn.read(buf) == ErrorStatus::OK);
+        run(ctx, [&]() -> slim::common::io::Task<void> {
+            co_await conn->read(buf);
+            co_await conn->write(request);
+        });
         REQUIRE(std::string(buf.begin(), buf.end()) == request);
 
-        REQUIRE(conn.write(request) == ErrorStatus::OK);
         char peer_buf[4096]{};
         ssize_t n = ::recv(sv[1], peer_buf, sizeof(peer_buf), 0);
         REQUIRE(n == static_cast<ssize_t>(request.size()));
         REQUIRE(std::string(peer_buf, static_cast<size_t>(n)) == request);
-
         ::close(sv[1]);
     }
 
@@ -219,26 +239,25 @@ TEST_CASE("tcp server handoff", "[tcp]") {
         int sv[2];
         REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
         ::send(sv[1], request.data(), request.size(), 0);
-        ::shutdown(sv[1], SHUT_WR);  // signal EOF so poll doesn't hang if break is missing
+        ::shutdown(sv[1], SHUT_WR);
 
         SchedCtx ctx;
-        Connection* conn_ptr = nullptr;
-        ctx.sched.spawn([&]() -> slim::common::io::Task<void> {
-            auto c = co_await Connection::create(ctx.sched, sv[0]);
-            conn_ptr = &c;
-        }());
-        ctx.sched.shutdown();
-        auto conn = std::move(*conn_ptr);
+        std::optional<Connection> conn;
+        run(ctx, [&]() -> slim::common::io::Task<void> {
+            conn.emplace(co_await Connection::create(ctx.sched, sv[0]));
+        });
+        REQUIRE(conn.has_value());
 
         std::vector<uint8_t> buf;
         auto start = std::chrono::steady_clock::now();
-        REQUIRE(conn.read(buf) == ErrorStatus::OK);
+        run(ctx, [&]() -> slim::common::io::Task<void> {
+            co_await conn->read(buf);
+        });
         auto elapsed = std::chrono::duration_cast<ms>(
             std::chrono::steady_clock::now() - start).count();
 
         REQUIRE(std::string(buf.begin(), buf.end()) == request);
         CHECK(elapsed < 100);
-
         ::close(sv[1]);
     }
 }
