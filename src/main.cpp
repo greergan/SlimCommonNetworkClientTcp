@@ -162,6 +162,7 @@ Task<void> Connection::read(std::vector<uint8_t>& buf, std::chrono::milliseconds
         int poll_rc = co_await poll_op;
 
         if (poll_rc == 0) break;
+        if (poll_rc == -ECANCELED) break;
         if (poll_rc < 0)  throw network::NetworkException(network::ErrorStatus::ReadPollFailed);
 
         auto offset = buf.size();
