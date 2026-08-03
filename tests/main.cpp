@@ -206,6 +206,15 @@ TEST_CASE("tcp tls", "[tcp][tls]") {
         }
         SSL_CTX_free(ssl_ctx);
     }
+    SECTION("handshake fails on plain port — exception thrown") {
+        SchedCtx ctx;
+        SSL_CTX* ssl_ctx = SSL_CTX_new(TLS_client_method());
+        REQUIRE(ssl_ctx != nullptr);
+        SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER, nullptr);
+        SSL_CTX_set_default_verify_paths(ssl_ctx);
+        REQUIRE_THROWS_AS(make_tls(ctx, "example.com", 80, ssl_ctx), NetworkException);
+        SSL_CTX_free(ssl_ctx);
+    }
 }
 
 TEST_CASE("tcp server handoff", "[tcp]") {

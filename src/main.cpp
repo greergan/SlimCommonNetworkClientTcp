@@ -104,25 +104,16 @@ Task<void> Connection::connect_async(std::chrono::milliseconds timeout) {
 
 Task<void> Connection::tls_async(SSL_CTX* ssl_ctx, std::chrono::milliseconds timeout) {
     SSL* ssl = nullptr;
-    network::ErrorStatus hs = co_await tls::do_client_handshake(
-        scheduler_, socket_fd_, ssl_ctx,
-        reinterpret_cast<const sockaddr*>(&server_addr_), sizeof(server_addr_),
-        ssl, host_.data(), timeout);
+    network::ErrorStatus hs = co_await tls::do_client_handshake(scheduler_, socket_fd_, ssl_ctx, ssl, host_.data(), timeout);
 
-    if (hs != network::ErrorStatus::OK)
-        throw network::NetworkException(hs, std::format("{}:{}", host_, port_));
-
-    network::ErrorStatus ks = tls::setup_ktls(
-        socket_fd_, *static_cast<tls::KeyMaterial*>(SSL_get_ex_data(ssl, tls::ssl_ex_data_index())));
-
-    if (ks == network::ErrorStatus::KtlsUnavailable) {
+    if (hs == network::ErrorStatus::KtlsUnavailable) {
+        // ktls unavailable — ssl holds the userspace TLS handle, keep it
         ssl_ = ssl;
-    } else if (ks != network::ErrorStatus::OK) {
-        SSL_free(ssl);
-        throw network::NetworkException(ks, std::format("{}:{}", host_, port_));
-    } else {
-        SSL_free(ssl);
+    } else if (hs != network::ErrorStatus::OK) {
+        if (ssl) SSL_free(ssl);
+        throw network::NetworkException(hs, std::format("{}:{}", host_, port_));
     }
+    // hs == OK means ktls is active; ssl was freed inside do_client_handshake
     is_tls_ = true;
 }
 
@@ -161,8 +152,8 @@ Task<void> Connection::read(std::vector<uint8_t>& buf, std::chrono::milliseconds
         poll_op.with_timeout(timeout);
         int poll_rc = co_await poll_op;
 
-        if (poll_rc == 0) break;
-        if (poll_rc == -ECANCELED) break;
+        if (poll_rc == 0)          break;
+        if (poll_rc == -ECANCELED) break;  // linked timeout fired — no more data
         if (poll_rc < 0)  throw network::NetworkException(network::ErrorStatus::ReadPollFailed);
 
         auto offset = buf.size();
