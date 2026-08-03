@@ -102,9 +102,15 @@ Task<void> Connection::connect_async(std::chrono::milliseconds timeout) {
 
 // ── Async TLS handshake + kTLS setup ─────────────────────────────────────────
 
+// ── Async TLS handshake + kTLS setup ─────────────────────────────────────────
+
 Task<void> Connection::tls_async(SSL_CTX* ssl_ctx, std::chrono::milliseconds timeout) {
     SSL* ssl = nullptr;
-    network::ErrorStatus hs = co_await tls::do_client_handshake(scheduler_, socket_fd_, ssl_ctx, ssl, host_.data(), timeout);
+    // Name the Task so its frame lifetime is tied to this local variable,
+    // not to the temporary expression — temporary Task lifetimes across
+    // co_await suspension points are not guaranteed by the standard.
+    auto handshake_task = tls::do_client_handshake(scheduler_, socket_fd_, ssl_ctx, ssl, host_.data(), timeout);
+    network::ErrorStatus hs = co_await handshake_task;
 
     if (hs == network::ErrorStatus::KtlsUnavailable) {
         // ktls unavailable — ssl holds the userspace TLS handle, keep it
@@ -112,8 +118,12 @@ Task<void> Connection::tls_async(SSL_CTX* ssl_ctx, std::chrono::milliseconds tim
     } else if (hs != network::ErrorStatus::OK) {
         if (ssl) SSL_free(ssl);
         throw network::NetworkException(hs, std::format("{}:{}", host_, port_));
+    } else {
+        // hs == OK: ktls is active at the kernel level; the SSL* was set
+        // by do_client_handshake but is no longer needed — free it here.
+        // (do_client_handshake does NOT free ssl on OK — it sets ssl_out.)
+        SSL_free(ssl);
     }
-    // hs == OK means ktls is active; ssl was freed inside do_client_handshake
     is_tls_ = true;
 }
 
