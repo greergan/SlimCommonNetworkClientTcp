@@ -23,8 +23,9 @@ void pass(std::string_view name, int& passed) {
     ++passed;
 }
 
-void fail(std::string_view name, int& failed, std::string_view detail = "") {
+void fail(std::string_view name, int& failed, std::vector<std::string>& failures, std::string_view detail = "") {
     slim::common::log::error({__func__, std::format("FAIL => {} => {}", name, detail), __FILE__, __LINE__});
+    failures.push_back(detail.empty() ? std::string(name) : std::format("{} => {}", name, detail));
     ++failed;
 }
 
@@ -37,20 +38,28 @@ struct SchedCtx {
 
 template<typename F>
 static void run(SchedCtx& ctx, F&& f) {
+    std::exception_ptr eptr;
     try {
-        ctx.sched.spawn([f = std::forward<F>(f)]() -> slim::common::io::Task<void> {
-            co_await f();
-        }());
+        ctx.sched.spawn(
+            [](auto fn, std::exception_ptr& ep) -> slim::common::io::Task<void> {
+                try {
+                    co_await fn();
+                } catch (...) {
+                    ep = std::current_exception();
+                }
+            }(std::forward<F>(f), eptr)
+        );
     } catch (...) {
         ctx.sched.shutdown();
         throw;
     }
     ctx.sched.shutdown();
+    if (eptr) std::rethrow_exception(eptr);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-static void run_tests(int& passed, int& failed) {
+static void run_tests(int& passed, int& failed, std::vector<std::string>& failures) {
 
     // ─── tcp connection ───────────────────────────────────────────────────────
 
@@ -65,7 +74,7 @@ static void run_tests(int& passed, int& failed) {
             });
         } catch (...) { threw = true; }
         if (threw || !conn.has_value()) {
-            fail(name, failed, "expected connection, got exception or no value");
+            fail(name, failed, failures, "expected connection, got exception or no value");
         } else {
             std::vector<uint8_t> buf;
             try {
@@ -75,9 +84,9 @@ static void run_tests(int& passed, int& failed) {
                 });
             } catch (...) { threw = true; }
             if (threw)
-                fail(name, failed, "write/read threw");
+                fail(name, failed, failures, "write/read threw");
             else if (!std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 200 OK"))
-                fail(name, failed, "response did not start with HTTP/1.1 200 OK");
+                fail(name, failed, failures, "response did not start with HTTP/1.1 200 OK");
             else
                 pass(name, passed);
         }
@@ -93,7 +102,7 @@ static void run_tests(int& passed, int& failed) {
                 conn.emplace(co_await Connection::create(ctx.sched, "example.com", 80));
             });
         } catch (...) { threw = true; }
-        if (threw) fail(name, failed, "unexpected exception");
+        if (threw) fail(name, failed, failures, "unexpected exception");
         else        pass(name, passed);
     }
 
@@ -109,7 +118,7 @@ static void run_tests(int& passed, int& failed) {
         } catch (const NetworkException&) { caught_network = true; }
           catch (...) {}
         if (caught_network) pass(name, passed);
-        else                fail(name, failed, "expected NetworkException");
+        else                fail(name, failed, failures, "expected NetworkException");
     }
 
     {
@@ -128,9 +137,9 @@ static void run_tests(int& passed, int& failed) {
         auto elapsed = std::chrono::duration_cast<ms>(
             std::chrono::steady_clock::now() - start).count();
         if (!caught_network)
-            fail(name, failed, "expected NetworkException");
+            fail(name, failed, failures, "expected NetworkException");
         else if (elapsed >= timeout_ms + 50)
-            fail(name, failed, std::format("elapsed={}ms exceeded timeout+50", elapsed));
+            fail(name, failed, failures, std::format("elapsed={}ms exceeded timeout+50", elapsed));
         else
             pass(name, passed);
     }
@@ -148,14 +157,14 @@ static void run_tests(int& passed, int& failed) {
             });
         } catch (...) { threw = true; }
         if (threw || !conn.has_value()) {
-            fail(name, failed, "connection failed");
+            fail(name, failed, failures, "connection failed");
         } else {
             try {
                 run(ctx, [&]() -> slim::common::io::Task<void> {
                     co_await conn->write("");
                 });
             } catch (...) { threw = true; }
-            if (threw) fail(name, failed, "unexpected exception on empty write");
+            if (threw) fail(name, failed, failures, "unexpected exception on empty write");
             else        pass(name, passed);
         }
     }
@@ -171,7 +180,7 @@ static void run_tests(int& passed, int& failed) {
             });
         } catch (...) { threw = true; }
         if (threw || !conn.has_value()) {
-            fail(name, failed, "connection failed");
+            fail(name, failed, failures, "connection failed");
         } else {
             std::vector<uint8_t> buf;
             try {
@@ -181,9 +190,9 @@ static void run_tests(int& passed, int& failed) {
                 });
             } catch (...) { threw = true; }
             if (threw)
-                fail(name, failed, "unexpected exception");
+                fail(name, failed, failures, "unexpected exception");
             else if (!std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 404"))
-                fail(name, failed, "response did not start with HTTP/1.1 404");
+                fail(name, failed, failures, "response did not start with HTTP/1.1 404");
             else
                 pass(name, passed);
         }
@@ -202,7 +211,7 @@ static void run_tests(int& passed, int& failed) {
             });
         } catch (...) { threw = true; }
         if (threw || !conn.has_value()) {
-            fail(name, failed, "connection failed");
+            fail(name, failed, failures, "connection failed");
         } else {
             std::vector<uint8_t> buf;
             try {
@@ -210,8 +219,8 @@ static void run_tests(int& passed, int& failed) {
                     co_await conn->read(buf);
                 });
             } catch (...) { threw = true; }
-            if (threw)            fail(name, failed, "unexpected exception");
-            else if (!buf.empty()) fail(name, failed, "expected empty buf");
+            if (threw)            fail(name, failed, failures, "unexpected exception");
+            else if (!buf.empty()) fail(name, failed, failures, "expected empty buf");
             else                   pass(name, passed);
         }
     }
@@ -233,9 +242,9 @@ static void run_tests(int& passed, int& failed) {
         auto elapsed = std::chrono::duration_cast<ms>(
             std::chrono::steady_clock::now() - start).count();
         if (threw)
-            fail(name, failed, "unexpected exception");
+            fail(name, failed, failures, "unexpected exception");
         else if (elapsed >= timeout_ms + 50)
-            fail(name, failed, std::format("elapsed={}ms exceeded timeout+50", elapsed));
+            fail(name, failed, failures, std::format("elapsed={}ms exceeded timeout+50", elapsed));
         else
             pass(name, passed);
     }
@@ -252,7 +261,7 @@ static void run_tests(int& passed, int& failed) {
             });
         } catch (...) { threw = true; }
         if (threw || !conn.has_value()) {
-            fail(name, failed, "connection failed");
+            fail(name, failed, failures, "connection failed");
         } else {
             auto start = std::chrono::steady_clock::now();
             try {
@@ -263,9 +272,9 @@ static void run_tests(int& passed, int& failed) {
             auto elapsed = std::chrono::duration_cast<ms>(
                 std::chrono::steady_clock::now() - start).count();
             if (threw)
-                fail(name, failed, "unexpected exception");
+                fail(name, failed, failures, "unexpected exception");
             else if (elapsed >= timeout_ms + 50)
-                fail(name, failed, std::format("elapsed={}ms exceeded timeout+50", elapsed));
+                fail(name, failed, failures, std::format("elapsed={}ms exceeded timeout+50", elapsed));
             else
                 pass(name, passed);
         }
@@ -283,7 +292,7 @@ static void run_tests(int& passed, int& failed) {
             });
         } catch (...) { threw = true; }
         if (threw || !conn.has_value()) {
-            fail(name, failed, "connection failed");
+            fail(name, failed, failures, "connection failed");
         } else {
             std::vector<uint8_t> buf;
             auto start = std::chrono::steady_clock::now();
@@ -296,11 +305,11 @@ static void run_tests(int& passed, int& failed) {
             auto elapsed = std::chrono::duration_cast<ms>(
                 std::chrono::steady_clock::now() - start).count();
             if (threw)
-                fail(name, failed, "unexpected exception");
+                fail(name, failed, failures, "unexpected exception");
             else if (!std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 200 OK"))
-                fail(name, failed, "response did not start with HTTP/1.1 200 OK");
+                fail(name, failed, failures, "response did not start with HTTP/1.1 200 OK");
             else if (elapsed >= timeout_ms + 50)
-                fail(name, failed, std::format("elapsed={}ms exceeded timeout+50", elapsed));
+                fail(name, failed, failures, std::format("elapsed={}ms exceeded timeout+50", elapsed));
             else
                 pass(name, passed);
         }
@@ -313,7 +322,7 @@ static void run_tests(int& passed, int& failed) {
         SchedCtx ctx;
         SSL_CTX* ssl_ctx = SSL_CTX_new(TLS_client_method());
         if (!ssl_ctx) {
-            fail(name, failed, "SSL_CTX_new failed");
+            fail(name, failed, failures, "SSL_CTX_new failed");
         } else {
             std::optional<Connection> conn;
             bool threw = false;
@@ -323,7 +332,7 @@ static void run_tests(int& passed, int& failed) {
                 });
             } catch (...) { threw = true; }
             if (threw || !conn.has_value()) {
-                fail(name, failed, "expected TLS connection");
+                fail(name, failed, failures, "expected TLS connection");
             } else {
                 std::vector<uint8_t> buf;
                 try {
@@ -333,9 +342,9 @@ static void run_tests(int& passed, int& failed) {
                     });
                 } catch (...) { threw = true; }
                 if (threw)
-                    fail(name, failed, "write/read threw");
+                    fail(name, failed, failures, "write/read threw");
                 else if (!std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 200 OK"))
-                    fail(name, failed, "response did not start with HTTP/1.1 200 OK");
+                    fail(name, failed, failures, "response did not start with HTTP/1.1 200 OK");
                 else
                     pass(name, passed);
             }
@@ -347,7 +356,7 @@ static void run_tests(int& passed, int& failed) {
         std::string_view name = "tcp tls shared ssl context";
         SSL_CTX* ssl_ctx = SSL_CTX_new(TLS_client_method());
         if (!ssl_ctx) {
-            fail(name, failed, "SSL_CTX_new failed");
+            fail(name, failed, failures, "SSL_CTX_new failed");
         } else {
             bool all_ok = true;
             for (int i = 0; i < 2 && all_ok; ++i) {
@@ -360,7 +369,7 @@ static void run_tests(int& passed, int& failed) {
                     });
                 } catch (...) { threw = true; }
                 if (threw || !conn.has_value()) {
-                    fail(name, failed, std::format("iteration {} connection failed", i));
+                    fail(name, failed, failures, std::format("iteration {} connection failed", i));
                     all_ok = false;
                 } else {
                     std::vector<uint8_t> buf;
@@ -371,10 +380,10 @@ static void run_tests(int& passed, int& failed) {
                         });
                     } catch (...) { threw = true; }
                     if (threw) {
-                        fail(name, failed, std::format("iteration {} write/read threw", i));
+                        fail(name, failed, failures, std::format("iteration {} write/read threw", i));
                         all_ok = false;
                     } else if (!std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 200 OK")) {
-                        fail(name, failed, std::format("iteration {} bad response", i));
+                        fail(name, failed, failures, std::format("iteration {} bad response", i));
                         all_ok = false;
                     }
                 }
@@ -389,7 +398,7 @@ static void run_tests(int& passed, int& failed) {
         SchedCtx ctx;
         SSL_CTX* ssl_ctx = SSL_CTX_new(TLS_client_method());
         if (!ssl_ctx) {
-            fail(name, failed, "SSL_CTX_new failed");
+            fail(name, failed, failures, "SSL_CTX_new failed");
         } else {
             SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER, nullptr);
             SSL_CTX_set_default_verify_paths(ssl_ctx);
@@ -402,7 +411,7 @@ static void run_tests(int& passed, int& failed) {
             } catch (const NetworkException&) { caught_network = true; }
               catch (...) {}
             if (caught_network) pass(name, passed);
-            else                fail(name, failed, "expected NetworkException");
+            else                fail(name, failed, failures, "expected NetworkException");
             SSL_CTX_free(ssl_ctx);
         }
     }
@@ -414,7 +423,7 @@ static void run_tests(int& passed, int& failed) {
         SchedCtx ctx;
         SSL_CTX* ssl_ctx = SSL_CTX_new(TLS_client_method());
         if (!ssl_ctx) {
-            fail(name, failed, "SSL_CTX_new failed");
+            fail(name, failed, failures, "SSL_CTX_new failed");
         } else {
             std::optional<Connection> conn;
             bool threw = false;
@@ -424,7 +433,7 @@ static void run_tests(int& passed, int& failed) {
                 });
             } catch (...) { threw = true; }
             if (threw || !conn.has_value()) {
-                fail(name, failed, "expected TLS connection");
+                fail(name, failed, failures, "expected TLS connection");
             } else {
                 std::vector<uint8_t> buf;
                 try {
@@ -434,9 +443,9 @@ static void run_tests(int& passed, int& failed) {
                     });
                 } catch (...) { threw = true; }
                 if (threw)
-                    fail(name, failed, "write/read threw");
+                    fail(name, failed, failures, "write/read threw");
                 else if (!std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 200 OK"))
-                    fail(name, failed, "response did not start with HTTP/1.1 200 OK");
+                    fail(name, failed, failures, "response did not start with HTTP/1.1 200 OK");
                 else
                     pass(name, passed);
             }
@@ -450,7 +459,7 @@ static void run_tests(int& passed, int& failed) {
         SchedCtx ctx;
         SSL_CTX* ssl_ctx = SSL_CTX_new(TLS_client_method());
         if (!ssl_ctx) {
-            fail(name, failed, "SSL_CTX_new failed");
+            fail(name, failed, failures, "SSL_CTX_new failed");
         } else {
             std::optional<Connection> conn;
             bool threw = false;
@@ -460,7 +469,7 @@ static void run_tests(int& passed, int& failed) {
                 });
             } catch (...) { threw = true; }
             if (threw || !conn.has_value()) {
-                fail(name, failed, "expected TLS connection");
+                fail(name, failed, failures, "expected TLS connection");
             } else {
                 std::vector<uint8_t> buf;
                 auto start = std::chrono::steady_clock::now();
@@ -473,11 +482,11 @@ static void run_tests(int& passed, int& failed) {
                 auto elapsed = std::chrono::duration_cast<ms>(
                     std::chrono::steady_clock::now() - start).count();
                 if (threw)
-                    fail(name, failed, "write/read threw");
+                    fail(name, failed, failures, "write/read threw");
                 else if (!std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 200 OK"))
-                    fail(name, failed, "response did not start with HTTP/1.1 200 OK");
+                    fail(name, failed, failures, "response did not start with HTTP/1.1 200 OK");
                 else if (elapsed >= timeout_ms + 50)
-                    fail(name, failed, std::format("elapsed={}ms exceeded timeout+50", elapsed));
+                    fail(name, failed, failures, std::format("elapsed={}ms exceeded timeout+50", elapsed));
                 else
                     pass(name, passed);
             }
@@ -490,7 +499,7 @@ static void run_tests(int& passed, int& failed) {
         SchedCtx ctx;
         SSL_CTX* ssl_ctx = SSL_CTX_new(TLS_client_method());
         if (!ssl_ctx) {
-            fail(name, failed, "SSL_CTX_new failed");
+            fail(name, failed, failures, "SSL_CTX_new failed");
         } else {
             std::optional<Connection> conn;
             bool threw = false;
@@ -500,7 +509,7 @@ static void run_tests(int& passed, int& failed) {
                 });
             } catch (...) { threw = true; }
             if (threw || !conn.has_value()) {
-                fail(name, failed, "expected TLS connection");
+                fail(name, failed, failures, "expected TLS connection");
             } else {
                 std::vector<uint8_t> buf;
                 try {
@@ -510,9 +519,9 @@ static void run_tests(int& passed, int& failed) {
                     });
                 } catch (...) { threw = true; }
                 if (threw)
-                    fail(name, failed, "write/read threw");
+                    fail(name, failed, failures, "write/read threw");
                 else if (!std::string(buf.begin(), buf.end()).starts_with("HTTP/1.1 4"))
-                    fail(name, failed, "response did not start with HTTP/1.1 4");
+                    fail(name, failed, failures, "response did not start with HTTP/1.1 4");
                 else
                     pass(name, passed);
             }
@@ -526,7 +535,7 @@ static void run_tests(int& passed, int& failed) {
         std::string_view name = "tcp server handoff plain accepted fd read and write";
         int sv[2];
         if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
-            fail(name, failed, "socketpair failed");
+            fail(name, failed, failures, "socketpair failed");
         } else {
             ::send(sv[1], request.data(), request.size(), 0);
             SchedCtx ctx;
@@ -538,7 +547,7 @@ static void run_tests(int& passed, int& failed) {
                 });
             } catch (...) { threw = true; }
             if (threw || !conn.has_value()) {
-                fail(name, failed, "Connection::create from fd failed");
+                fail(name, failed, failures, "Connection::create from fd failed");
             } else {
                 std::vector<uint8_t> buf;
                 try {
@@ -548,16 +557,16 @@ static void run_tests(int& passed, int& failed) {
                     });
                 } catch (...) { threw = true; }
                 if (threw) {
-                    fail(name, failed, "read/write threw");
+                    fail(name, failed, failures, "read/write threw");
                 } else if (std::string(buf.begin(), buf.end()) != request) {
-                    fail(name, failed, "read buf did not match request");
+                    fail(name, failed, failures, "read buf did not match request");
                 } else {
                     char peer_buf[4096]{};
                     ssize_t n = ::recv(sv[1], peer_buf, sizeof(peer_buf), 0);
                     if (n != static_cast<ssize_t>(request.size()))
-                        fail(name, failed, std::format("peer recv n={} expected={}", n, request.size()));
+                        fail(name, failed, failures, std::format("peer recv n={} expected={}", n, request.size()));
                     else if (std::string(peer_buf, static_cast<size_t>(n)) != request)
-                        fail(name, failed, "peer buf did not match request");
+                        fail(name, failed, failures, "peer buf did not match request");
                     else
                         pass(name, passed);
                 }
@@ -570,7 +579,7 @@ static void run_tests(int& passed, int& failed) {
         std::string_view name = "tcp server handoff partial read exits without blocking";
         int sv[2];
         if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
-            fail(name, failed, "socketpair failed");
+            fail(name, failed, failures, "socketpair failed");
         } else {
             ::send(sv[1], request.data(), request.size(), 0);
             ::shutdown(sv[1], SHUT_WR);
@@ -583,7 +592,7 @@ static void run_tests(int& passed, int& failed) {
                 });
             } catch (...) { threw = true; }
             if (threw || !conn.has_value()) {
-                fail(name, failed, "Connection::create from fd failed");
+                fail(name, failed, failures, "Connection::create from fd failed");
             } else {
                 std::vector<uint8_t> buf;
                 auto start = std::chrono::steady_clock::now();
@@ -595,11 +604,11 @@ static void run_tests(int& passed, int& failed) {
                 auto elapsed = std::chrono::duration_cast<ms>(
                     std::chrono::steady_clock::now() - start).count();
                 if (threw)
-                    fail(name, failed, "unexpected exception");
+                    fail(name, failed, failures, "unexpected exception");
                 else if (std::string(buf.begin(), buf.end()) != request)
-                    fail(name, failed, "buf did not match request");
+                    fail(name, failed, failures, "buf did not match request");
                 else if (elapsed >= 100)
-                    fail(name, failed, std::format("elapsed={}ms exceeded 100ms", elapsed));
+                    fail(name, failed, failures, std::format("elapsed={}ms exceeded 100ms", elapsed));
                 else
                     pass(name, passed);
             }
@@ -617,13 +626,17 @@ int main() {
     _res.retry   = 1;
     int passed = 0;
     int failed = 0;
+    std::vector<std::string> failures;
 
-    run_tests(passed, failed);
+    run_tests(passed, failed, failures);
 
     if (failed == 0)
         slim::common::log::debug({__func__, std::format("Results => {} passed => {} failed", passed, failed), __FILE__, __LINE__});
-    else
+    else {
+        for (const auto& f : failures)
+            slim::common::log::error({__func__, std::format("FAILED => {}", f), __FILE__, __LINE__});
         slim::common::log::error({__func__, std::format("Results => {} passed => {} failed", passed, failed), __FILE__, __LINE__});
+    }
 
     return failed == 0 ? 0 : 1;
 }
