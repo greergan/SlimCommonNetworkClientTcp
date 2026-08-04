@@ -358,9 +358,9 @@ Task<void> Connection::read(std::vector<uint8_t>& buf, std::chrono::milliseconds
 #endif
                 if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
 #ifdef ENABLE_LOGGING
-                    log::debug({__func__, "SSL_ERROR_WANT_READ/WRITE, breaking", __FILE__, __LINE__});
+                    log::debug({__func__, "SSL_ERROR_WANT_READ/WRITE, continuing", __FILE__, __LINE__});
 #endif
-                    break;
+                    continue;
                 }
 #ifdef ENABLE_LOGGING
                 log::trace({__func__, "ends (throw ReadTlsFailed)", __FILE__, __LINE__});
