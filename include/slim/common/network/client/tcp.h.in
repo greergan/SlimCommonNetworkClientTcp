@@ -1,5 +1,4 @@
-#ifndef SLIM_COMMON_NETWORK_CLIENT_TCP_H
-#define SLIM_COMMON_NETWORK_CLIENT_TCP_H
+#pragma once
 #include <netdb.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -13,30 +12,20 @@
 #include <slim/common/io/scheduler.h>
 #include <slim/common/io/task.h>
 #include <slim/common/network/error_codes.h>
-
 #define SLIMCOMMONNETWORKCLIENTTCP_VERSION  "@SLIMCOMMONNETWORKCLIENTTCP_VERSION@"
 #define SLIMCOMMONNETWORKCLIENTTCP_GIT_HASH "@SLIMCOMMONNETWORKCLIENTTCP_GIT_HASH@"
-
 namespace slim::common::network::client::tcp {
 constexpr size_t BUFFER_SIZE = 8192;
 class Connection {
 public:
-    ~Connection();
-    Connection()                             = default;
-    Connection(const Connection&)            = delete;
-    Connection& operator=(const Connection&) = delete;
     Connection(Connection&&) noexcept;
-    Connection& operator=(Connection&&)      = delete;
-
+    ~Connection();
     static slim::common::io::Task<Connection> create(slim::common::io::Scheduler& scheduler, std::string_view host, uint16_t port,
         std::chrono::milliseconds timeout = std::chrono::seconds(5));
-
     static slim::common::io::Task<Connection> create(slim::common::io::Scheduler& scheduler, std::string_view host, uint16_t port,
         SSL_CTX* ssl_ctx, std::chrono::milliseconds timeout = std::chrono::seconds(5));
-
     static slim::common::io::Task<Connection> create(slim::common::io::Scheduler& scheduler,int fd, SSL_CTX* ssl_ctx = nullptr,
         std::chrono::milliseconds timeout = std::chrono::seconds(5));
-
     slim::common::io::Task<void> read(std::vector<uint8_t>& buf,std::chrono::milliseconds timeout = std::chrono::seconds(5));
     slim::common::io::Task<void> write(std::string_view payload,std::chrono::milliseconds timeout = std::chrono::seconds(5));
     slim::common::io::Task<void> write(std::span<uint8_t> payload, std::chrono::milliseconds timeout = std::chrono::seconds(5));
@@ -58,4 +47,3 @@ private:
     slim::common::io::Task<void> tls_async(SSL_CTX* ssl_ctx, std::chrono::milliseconds timeout);
 };
 } // namespace slim::common::network::client::tcp
-#endif // SLIM_COMMON_NETWORK_CLIENT_TCP_H
